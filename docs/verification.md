@@ -641,3 +641,59 @@ Argument:
   during the optimum search, which only reads it. So every probability index and
   price derived from a state is unchanged. The values stay in 0..11 through the
   same transitions.
+
+### Optimum-search positions as struct-of-arrays
+
+Change, in `lzma-encoder-normal.ts`: the `Optimum` class becomes `Optimums`,
+holding `state` (`Uint8Array`), `reps` (`Int32Array` of `size * REPS`, position
+`i` at `i * REPS`), `price`, `optPrev`, `backPrev`, `optPrev2`, `backPrev2`
+(`Int32Array`) and `prev1IsLiteral`, `hasPrev2` (`Uint8Array`, 1 and 0),
+allocated with the same `optsSize` as before. The Java code's methods stay with
+their comments and take the position first: `this.opts[x].set1(...)` becomes
+`this.opts.set1(x, ...)`, likewise `set2`, `set3` and `reset`. A field access
+`this.opts[x].f` becomes `this.opts.f[x]`, a reps access `this.opts[x].reps[k]`
+becomes `this.opts.reps[x * REPS + k]`, and a boolean read becomes `!== 0`. The
+three whole-reps copies become `this.opts.reps.set(this.reps, 0)` and two
+`copyWithin` calls over the same positions. In `convertOpts`, the object `opt`
+captured at the top of each iteration becomes its index `cur`.
+
+Argument:
+
+- _Position objects and indexes correspond one to one._ `opts` was a `readonly`
+  array whose objects were created once in the constructor and never replaced,
+  reordered or stored elsewhere. So object `opts[i]` and index `i` correspond
+  for the encoder's lifetime, every access `this.opts[x].f` reaches the same
+  logical field as `this.opts.f[x]` with `x` evaluated at the same point, and
+  the captured `opt` reaches the same fields as the captured `cur`, even after
+  `this.optCur` changes in the loop body. Any aliasing between a captured
+  position and a later index is therefore preserved exactly.
+- _Every value fits its storage exactly._ Prices are below 2^30 or equal
+  `INFINITY_PRICE` (2^30; hazard checklist), so `Int32Array` holds them exactly.
+  `optPrev` and `optPrev2` are positions below 4096. `backPrev` and `backPrev2`
+  are -1 or below `REPS + dictSize` (dictionary at most 768 MiB), so below 2^31.
+  Reps were already `Int32Array`. States are 0 to 11 (previous entry) and fit a
+  `Uint8Array`. Booleans are stored as 1 and 0 and read back with `!== 0`, which
+  yields the boolean that was stored. So every read returns exactly the value
+  the object field held.
+- _Initial contents._ The typed arrays start at 0, as every field did: `price`
+  0, positions and backs 0, booleans false, state 0 (the value of a new
+  `State`), reps 0. Neither form clears the positions on `reset()` or `restart`;
+  their contents persist identically.
+- _Reps copies do not overlap._ The source position of each copy (`optPrev`,
+  possibly after `--optPrev`) is strictly below the destination `optCur`: every
+  `set1`, `set2` and `set3` records a predecessor below the position it writes,
+  and `updateOptStateAndReps` only moves it lower. Each position owns the block
+  `[i * REPS, i * REPS + REPS)`, so the source and destination ranges are
+  disjoint, and `copyWithin` copies the same values as the Java code's copy
+  between two arrays. The first-position copy `reps.set(this.reps, 0)` reads the
+  coder's own array.
+- _Bounds._ An out-of-range typed-array index reads `undefined` or drops a write
+  silently, where the object form threw on the missing object, so equivalence
+  depends on every index being in range. The known-size bound in the hazard
+  checklist (every position touched is at most `min(N, 4095) <= sizeClass + 1`,
+  below `optsSize`) did not depend on the storage and still holds, and every
+  reps index `x * REPS + k` with `k < REPS` is then below `optsSize * REPS`.
+  With an unknown size, `optsSize` is 4096 and positions stay below it as in the
+  Java code.
+- _Same order._ Each rewritten statement performs the same reads and writes in
+  the same order; the method bodies keep their statements.
