@@ -485,3 +485,36 @@ Argument:
   `PROB_INIT` (previous entry), so before the first probability is read, every
   element of a reused array equals the same element of a fresh array after its
   reset. From there on, decoding depends on the input alone, as before.
+
+### Price computations in module functions
+
+This entry only prepares the next one, which runs the encoder's price code on a
+probability array other than the encoder's own.
+
+Change, in `lzma-encoder.ts`: the loops of `updateDistPrices` and
+`updateAlignPrices` after their counter assignments, and the whole body of
+`LengthEncoder.updatePosStatePrices`, move unchanged into the module functions
+`computeDistPrices(probs, distSlotPricesSize, distSlotPrices, fullDistPrices)`,
+`computeAlignPrices(probs, alignPrices)` and
+`computeLengthPrices(probs, coder, posState, prices)`. The methods keep their
+counter assignments and call the functions with `this.probs`, the encoder's
+fields, and for lengths the row `this.prices[posState]`. Inside the functions,
+`this.x` reads become the parameters and `this.prices[posState]` becomes
+`prices`; loops, loop forms, statement order and the Java comments stay.
+
+Argument:
+
+- _Same values bound._ Each method is the functions' only caller and passes
+  exactly the fields the moved statements read (`probs`, `distSlotPricesSize`,
+  `distSlotPrices`, `fullDistPrices`, `alignPrices`, `coder`). These fields are
+  `readonly` and assigned only in the constructors, so a parameter holds the
+  same reference or number the field would yield at any point of the call.
+- _The length row._ `this.prices[posState]` is evaluated once, at the call,
+  instead of at every access. The outer array is `readonly`, and no code assigns
+  its elements (the only writes into price tables are element writes inside
+  rows), so every former evaluation yields the row passed in, and
+  `prices.length` equals the former `this.prices[posState].length`.
+- _Same statements, same order._ The bodies are otherwise identical, so they
+  perform the same reads and writes in the same order, and the methods do the
+  same work before and after the call (the counter assignments come first, as
+  before). No moved statement uses `this` for anything else.

@@ -378,46 +378,13 @@ export abstract class LzmaEncoder extends LzmaCoder {
 	private updateDistPrices(): void {
 		this.distPriceCount = DIST_PRICE_UPDATE_INTERVAL;
 
-		for (let distState = 0; distState < DIST_STATES; ++distState) {
-			for (let distSlot = 0; distSlot < this.distSlotPricesSize; ++distSlot) {
-				this.distSlotPrices[distState][distSlot] = getBitTreePrice(this.probs, DIST_SLOT_OFFSET + (distState << DIST_SLOT_BITS), DIST_SLOT_BITS, distSlot);
-			}
-
-			for (let distSlot = DIST_MODEL_END; distSlot < this.distSlotPricesSize; ++distSlot) {
-				const count = (distSlot >>> 1) - 1 - ALIGN_BITS;
-				this.distSlotPrices[distState][distSlot] += getDirectBitsPrice(count);
-			}
-
-			for (let dist = 0; dist < DIST_MODEL_START; ++dist) {
-				this.fullDistPrices[distState][dist] = this.distSlotPrices[distState][dist];
-			}
-		}
-
-		let dist = DIST_MODEL_START;
-		for (let distSlot = DIST_MODEL_START; distSlot < DIST_MODEL_END; ++distSlot) {
-			const footerBits = (distSlot >>> 1) - 1;
-			const base = (2 | (distSlot & 1)) << footerBits;
-
-			const limit = 1 << footerBits;
-			for (let i = 0; i < limit; ++i) {
-				const distReduced = dist - base;
-				const price = getReverseBitTreePrice(this.probs, distSpecialOffset(distSlot, base), footerBits, distReduced);
-
-				for (let distState = 0; distState < DIST_STATES; ++distState) {
-					this.fullDistPrices[distState][dist] = this.distSlotPrices[distState][distSlot] + price;
-				}
-
-				++dist;
-			}
-		}
+		computeDistPrices(this.probs, this.distSlotPricesSize, this.distSlotPrices, this.fullDistPrices);
 	}
 
 	private updateAlignPrices(): void {
 		this.alignPriceCount = ALIGN_PRICE_UPDATE_INTERVAL;
 
-		for (let i = 0; i < ALIGN_SIZE; ++i) {
-			this.alignPrices[i] = getReverseBitTreePrice(this.probs, DIST_ALIGN, ALIGN_BITS, i);
-		}
+		computeAlignPrices(this.probs, this.alignPrices);
 	}
 
 	/**
@@ -436,6 +403,47 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 		this.matchLenEncoder.updatePrices();
 		this.repLenEncoder.updatePrices();
+	}
+}
+
+function computeDistPrices(probs: Probs, distSlotPricesSize: number, distSlotPrices: Int32Array[], fullDistPrices: Int32Array[]): void {
+	for (let distState = 0; distState < DIST_STATES; ++distState) {
+		for (let distSlot = 0; distSlot < distSlotPricesSize; ++distSlot) {
+			distSlotPrices[distState][distSlot] = getBitTreePrice(probs, DIST_SLOT_OFFSET + (distState << DIST_SLOT_BITS), DIST_SLOT_BITS, distSlot);
+		}
+
+		for (let distSlot = DIST_MODEL_END; distSlot < distSlotPricesSize; ++distSlot) {
+			const count = (distSlot >>> 1) - 1 - ALIGN_BITS;
+			distSlotPrices[distState][distSlot] += getDirectBitsPrice(count);
+		}
+
+		for (let dist = 0; dist < DIST_MODEL_START; ++dist) {
+			fullDistPrices[distState][dist] = distSlotPrices[distState][dist];
+		}
+	}
+
+	let dist = DIST_MODEL_START;
+	for (let distSlot = DIST_MODEL_START; distSlot < DIST_MODEL_END; ++distSlot) {
+		const footerBits = (distSlot >>> 1) - 1;
+		const base = (2 | (distSlot & 1)) << footerBits;
+
+		const limit = 1 << footerBits;
+		for (let i = 0; i < limit; ++i) {
+			const distReduced = dist - base;
+			const price = getReverseBitTreePrice(probs, distSpecialOffset(distSlot, base), footerBits, distReduced);
+
+			for (let distState = 0; distState < DIST_STATES; ++distState) {
+				fullDistPrices[distState][dist] = distSlotPrices[distState][distSlot] + price;
+			}
+
+			++dist;
+		}
+	}
+}
+
+function computeAlignPrices(probs: Probs, alignPrices: Int32Array): void {
+	for (let i = 0; i < ALIGN_SIZE; ++i) {
+		alignPrices[i] = getReverseBitTreePrice(probs, DIST_ALIGN, ALIGN_BITS, i);
 	}
 }
 
@@ -637,27 +645,31 @@ export class LengthEncoder extends LengthCoder {
 	}
 
 	private updatePosStatePrices(posState: number): void {
-		let choice0Price = getBitPrice(this.probs[this.coder + LEN_CHOICE], 0);
+		computeLengthPrices(this.probs, this.coder, posState, this.prices[posState]);
+	}
+}
 
-		let i = 0;
-		for (; i < LOW_SYMBOLS; ++i) {
-			this.prices[posState][i] = choice0Price
-				+ getBitTreePrice(this.probs, this.coder + LEN_LOW + posState * LOW_SYMBOLS, 3, i);
-		}
+function computeLengthPrices(probs: Probs, coder: number, posState: number, prices: Int32Array): void {
+	let choice0Price = getBitPrice(probs[coder + LEN_CHOICE], 0);
 
-		choice0Price = getBitPrice(this.probs[this.coder + LEN_CHOICE], 1);
-		let choice1Price = getBitPrice(this.probs[this.coder + LEN_CHOICE2], 0);
+	let i = 0;
+	for (; i < LOW_SYMBOLS; ++i) {
+		prices[i] = choice0Price
+			+ getBitTreePrice(probs, coder + LEN_LOW + posState * LOW_SYMBOLS, 3, i);
+	}
 
-		for (; i < LOW_SYMBOLS + MID_SYMBOLS; ++i) {
-			this.prices[posState][i] = choice0Price + choice1Price
-				+ getBitTreePrice(this.probs, this.coder + LEN_MID + posState * MID_SYMBOLS, 3, i - LOW_SYMBOLS);
-		}
+	choice0Price = getBitPrice(probs[coder + LEN_CHOICE], 1);
+	let choice1Price = getBitPrice(probs[coder + LEN_CHOICE2], 0);
 
-		choice1Price = getBitPrice(this.probs[this.coder + LEN_CHOICE2], 1);
+	for (; i < LOW_SYMBOLS + MID_SYMBOLS; ++i) {
+		prices[i] = choice0Price + choice1Price
+			+ getBitTreePrice(probs, coder + LEN_MID + posState * MID_SYMBOLS, 3, i - LOW_SYMBOLS);
+	}
 
-		for (; i < this.prices[posState].length; ++i) {
-			this.prices[posState][i] = choice0Price + choice1Price
-				+ getBitTreePrice(this.probs, this.coder + LEN_HIGH, 8, i - LOW_SYMBOLS - MID_SYMBOLS);
-		}
+	choice1Price = getBitPrice(probs[coder + LEN_CHOICE2], 1);
+
+	for (; i < prices.length; ++i) {
+		prices[i] = choice0Price + choice1Price
+			+ getBitTreePrice(probs, coder + LEN_HIGH, 8, i - LOW_SYMBOLS - MID_SYMBOLS);
 	}
 }
