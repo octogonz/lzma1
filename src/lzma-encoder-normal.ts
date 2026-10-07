@@ -18,7 +18,10 @@ import {
 	MATCH_LEN_MAX,
 	MATCH_LEN_MIN,
 	REPS,
-	State,
+	stateAfterLiteral,
+	stateAfterLongRep,
+	stateAfterMatch,
+	stateAfterShortRep,
 } from "./lzma-coder.js";
 import {
 	LzmaEncoder,
@@ -35,7 +38,8 @@ const INFINITY_PRICE = 1 << 30;
 
 /** The cheapest known way to arrive at one position. */
 class Optimum {
-	readonly state = new State();
+	/** The state after arriving here; 0 is the value of a new `State`. */
+	state = 0;
 	readonly reps = new Int32Array(REPS);
 
 	/** Cumulative price of arriving to this byte. */
@@ -105,7 +109,9 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 	// These are fields solely to avoid allocating the objects again and
 	// again on each function call.
 	private readonly repLens = new Int32Array(REPS);
-	private readonly nextState = new State();
+
+	/** State after the symbols being priced, as in the Java code. */
+	private nextState = 0;
 
 	constructor(rc: RangeEncoder, lz: LzEncoder, config: LzmaEncoderNormalConfig) {
 		super(rc, lz, config);
@@ -238,17 +244,17 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 		// Calculate the price of encoding the current byte as a literal.
 		{
 			const prevByte = this.lz.getByte(1);
-			const literalPrice = this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos, this.state);
+			const literalPrice = this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos, this.state.get());
 			this.opts[1].set1(literalPrice, 0, -1);
 		}
 
-		let anyMatchPrice = this.getAnyMatchPrice(this.state, posState);
-		let anyRepPrice = this.getAnyRepPrice(anyMatchPrice, this.state);
+		let anyMatchPrice = this.getAnyMatchPrice(this.state.get(), posState);
+		let anyRepPrice = this.getAnyRepPrice(anyMatchPrice, this.state.get());
 
 		// If it is possible to encode this byte as a short rep, see if
 		// it is cheaper than encoding it as a literal.
 		if (matchByte === curByte) {
-			const shortRepPrice = this.getShortRepPrice(anyRepPrice, this.state, posState);
+			const shortRepPrice = this.getShortRepPrice(anyRepPrice, this.state.get(), posState);
 			if (shortRepPrice < this.opts[1].price) {
 				this.opts[1].set1(shortRepPrice, 0, 0);
 			}
@@ -270,7 +276,7 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 		// Initialize the state and reps of this position in opts[].
 		// updateOptStateAndReps() will need these to get the new
 		// state and reps for the next byte.
-		this.opts[0].state.set(this.state);
+		this.opts[0].state = this.state.get();
 		this.opts[0].reps.set(this.reps);
 
 		// Initialize the prices for latter opts that will be used below.
@@ -285,7 +291,7 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 				continue;
 			}
 
-			const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, this.state, posState);
+			const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, this.state.get(), posState);
 			do {
 				const price = longRepPrice + this.repLenEncoder.getPrice(repLen, posState);
 				if (price < this.opts[repLen].price) {
@@ -298,7 +304,7 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 		{
 			let len = Math.max(this.repLens[0] + 1, MATCH_LEN_MIN);
 			if (len <= mainLen) {
-				const normalMatchPrice = this.getNormalMatchPrice(anyMatchPrice, this.state);
+				const normalMatchPrice = this.getNormalMatchPrice(anyMatchPrice, this.state.get());
 
 				// Set i to the index of the shortest match that is
 				// at least len bytes long.
@@ -366,27 +372,27 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			--optPrev;
 
 			if (this.opts[this.optCur].hasPrev2) {
-				this.opts[this.optCur].state.set(this.opts[this.opts[this.optCur].optPrev2].state);
+				this.opts[this.optCur].state = this.opts[this.opts[this.optCur].optPrev2].state;
 				if (this.opts[this.optCur].backPrev2 < REPS) {
-					this.opts[this.optCur].state.updateLongRep();
+					this.opts[this.optCur].state = stateAfterLongRep(this.opts[this.optCur].state);
 				} else {
-					this.opts[this.optCur].state.updateMatch();
+					this.opts[this.optCur].state = stateAfterMatch(this.opts[this.optCur].state);
 				}
 			} else {
-				this.opts[this.optCur].state.set(this.opts[optPrev].state);
+				this.opts[this.optCur].state = this.opts[optPrev].state;
 			}
 
-			this.opts[this.optCur].state.updateLiteral();
+			this.opts[this.optCur].state = stateAfterLiteral(this.opts[this.optCur].state);
 		} else {
-			this.opts[this.optCur].state.set(this.opts[optPrev].state);
+			this.opts[this.optCur].state = this.opts[optPrev].state;
 		}
 
 		if (optPrev === this.optCur - 1) {
 			// Must be either a short rep or a literal.
 			if (this.opts[this.optCur].backPrev === 0) {
-				this.opts[this.optCur].state.updateShortRep();
+				this.opts[this.optCur].state = stateAfterShortRep(this.opts[this.optCur].state);
 			} else {
-				this.opts[this.optCur].state.updateLiteral();
+				this.opts[this.optCur].state = stateAfterLiteral(this.opts[this.optCur].state);
 			}
 
 			this.opts[this.optCur].reps.set(this.opts[optPrev].reps);
@@ -395,13 +401,13 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			if (this.opts[this.optCur].prev1IsLiteral && this.opts[this.optCur].hasPrev2) {
 				optPrev = this.opts[this.optCur].optPrev2;
 				back = this.opts[this.optCur].backPrev2;
-				this.opts[this.optCur].state.updateLongRep();
+				this.opts[this.optCur].state = stateAfterLongRep(this.opts[this.optCur].state);
 			} else {
 				back = this.opts[this.optCur].backPrev;
 				if (back < REPS) {
-					this.opts[this.optCur].state.updateLongRep();
+					this.opts[this.optCur].state = stateAfterLongRep(this.opts[this.optCur].state);
 				} else {
-					this.opts[this.optCur].state.updateMatch();
+					this.opts[this.optCur].state = stateAfterMatch(this.opts[this.optCur].state);
 				}
 			}
 
@@ -459,8 +465,8 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			const len = this.lz.getMatchLen(1, this.opts[this.optCur].reps[0], lenLimit);
 
 			if (len >= MATCH_LEN_MIN) {
-				this.nextState.set(this.opts[this.optCur].state);
-				this.nextState.updateLiteral();
+				this.nextState = this.opts[this.optCur].state;
+				this.nextState = stateAfterLiteral(this.nextState);
 				const nextPosState = (pos + 1) & this.posMask;
 				const price = literalPrice
 					+ this.getLongRepAndLenPrice(0, len, this.nextState, nextPosState);
@@ -523,15 +529,15 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 				// Rep
 				let price = longRepPrice
 					+ this.repLenEncoder.getPrice(len, posState);
-				this.nextState.set(this.opts[this.optCur].state);
-				this.nextState.updateLongRep();
+				this.nextState = this.opts[this.optCur].state;
+				this.nextState = stateAfterLongRep(this.nextState);
 
 				// Literal
 				const curByte = this.lz.getByteAt(len, 0);
 				const matchByte = this.lz.getByte(0); // lz.getByteAt(len, len)
 				const prevByte = this.lz.getByteAt(len, 1);
 				price += this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos + len, this.nextState);
-				this.nextState.updateLiteral();
+				this.nextState = stateAfterLiteral(this.nextState);
 
 				// Rep0
 				const nextPosState = (pos + len + 1) & this.posMask;
@@ -604,8 +610,8 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 
 				const len2 = this.lz.getMatchLen(len + 1, dist, len2Limit);
 				if (len2 >= MATCH_LEN_MIN) {
-					this.nextState.set(this.opts[this.optCur].state);
-					this.nextState.updateMatch();
+					this.nextState = this.opts[this.optCur].state;
+					this.nextState = stateAfterMatch(this.nextState);
 
 					// Literal
 					const curByte = this.lz.getByteAt(len, 0);
@@ -613,7 +619,7 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 					const prevByte = this.lz.getByteAt(len, 1);
 					let price = matchAndLenPrice
 						+ this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos + len, this.nextState);
-					this.nextState.updateLiteral();
+					this.nextState = stateAfterLiteral(this.nextState);
 
 					// Rep0
 					const nextPosState = (pos + len + 1) & this.posMask;

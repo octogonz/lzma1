@@ -37,6 +37,7 @@ import {
 	IS_REP0_LONG,
 	IS_REP1,
 	IS_REP2,
+	isLiteralState,
 	LEN_CHOICE,
 	LEN_CHOICE2,
 	LEN_HIGH,
@@ -323,47 +324,47 @@ export abstract class LzmaEncoder extends LzmaCoder {
 		this.lz.skip(len);
 	}
 
-	getAnyMatchPrice(state: State, posState: number): number {
-		return getBitPrice(this.probs[IS_MATCH + (state.get() << 4) + posState], 1);
+	getAnyMatchPrice(state: number, posState: number): number {
+		return getBitPrice(this.probs[IS_MATCH + (state << 4) + posState], 1);
 	}
 
-	getNormalMatchPrice(anyMatchPrice: number, state: State): number {
+	getNormalMatchPrice(anyMatchPrice: number, state: number): number {
 		return anyMatchPrice
-			+ getBitPrice(this.probs[IS_REP + state.get()], 0);
+			+ getBitPrice(this.probs[IS_REP + state], 0);
 	}
 
-	getAnyRepPrice(anyMatchPrice: number, state: State): number {
+	getAnyRepPrice(anyMatchPrice: number, state: number): number {
 		return anyMatchPrice
-			+ getBitPrice(this.probs[IS_REP + state.get()], 1);
+			+ getBitPrice(this.probs[IS_REP + state], 1);
 	}
 
-	getShortRepPrice(anyRepPrice: number, state: State, posState: number): number {
+	getShortRepPrice(anyRepPrice: number, state: number, posState: number): number {
 		return anyRepPrice
-			+ getBitPrice(this.probs[IS_REP0 + state.get()], 0)
-			+ getBitPrice(this.probs[IS_REP0_LONG + (state.get() << 4) + posState], 0);
+			+ getBitPrice(this.probs[IS_REP0 + state], 0)
+			+ getBitPrice(this.probs[IS_REP0_LONG + (state << 4) + posState], 0);
 	}
 
-	getLongRepPrice(anyRepPrice: number, rep: number, state: State, posState: number): number {
+	getLongRepPrice(anyRepPrice: number, rep: number, state: number, posState: number): number {
 		let price = anyRepPrice;
 
 		if (rep === 0) {
-			price += getBitPrice(this.probs[IS_REP0 + state.get()], 0)
-				+ getBitPrice(this.probs[IS_REP0_LONG + (state.get() << 4) + posState], 1);
+			price += getBitPrice(this.probs[IS_REP0 + state], 0)
+				+ getBitPrice(this.probs[IS_REP0_LONG + (state << 4) + posState], 1);
 		} else {
-			price += getBitPrice(this.probs[IS_REP0 + state.get()], 1);
+			price += getBitPrice(this.probs[IS_REP0 + state], 1);
 
 			if (rep === 1) {
-				price += getBitPrice(this.probs[IS_REP1 + state.get()], 0);
+				price += getBitPrice(this.probs[IS_REP1 + state], 0);
 			} else {
-				price += getBitPrice(this.probs[IS_REP1 + state.get()], 1)
-					+ getBitPrice(this.probs[IS_REP2 + state.get()], rep - 2);
+				price += getBitPrice(this.probs[IS_REP1 + state], 1)
+					+ getBitPrice(this.probs[IS_REP2 + state], rep - 2);
 			}
 		}
 
 		return price;
 	}
 
-	getLongRepAndLenPrice(rep: number, len: number, state: State, posState: number): number {
+	getLongRepAndLenPrice(rep: number, len: number, state: number, posState: number): number {
 		const anyMatchPrice = this.getAnyMatchPrice(state, posState);
 		const anyRepPrice = this.getAnyRepPrice(anyMatchPrice, state);
 		const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, state, posState);
@@ -507,12 +508,12 @@ export class LiteralEncoder extends LiteralCoder {
 		this.subencoders[i].encode(rc);
 	}
 
-	getPrice(curByte: number, matchByte: number, prevByte: number, pos: number, state: State): number {
+	getPrice(curByte: number, matchByte: number, prevByte: number, pos: number, state: number): number {
 		const encoder = this.encoder;
-		let price = getBitPrice(encoder.probs[IS_MATCH + (state.get() << 4) + (pos & encoder.posMask)], 0);
+		let price = getBitPrice(encoder.probs[IS_MATCH + (state << 4) + (pos & encoder.posMask)], 0);
 
 		const i = this.getSubcoderIndex(prevByte, pos);
-		price += state.isLiteral()
+		price += isLiteralState(state)
 			? this.subencoders[i].getNormalPrice(curByte)
 			: this.subencoders[i].getMatchedPrice(curByte, matchByte);
 

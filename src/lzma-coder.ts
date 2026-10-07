@@ -91,29 +91,23 @@ export class State {
 	}
 
 	updateLiteral(): void {
-		if (this.state <= SHORTREP_LIT_LIT) {
-			this.state = LIT_LIT;
-		} else if (this.state <= LIT_SHORTREP) {
-			this.state -= 3;
-		} else {
-			this.state -= 6;
-		}
+		this.state = stateAfterLiteral(this.state);
 	}
 
 	updateMatch(): void {
-		this.state = this.state < LIT_STATES ? LIT_MATCH : NONLIT_MATCH;
+		this.state = stateAfterMatch(this.state);
 	}
 
 	updateLongRep(): void {
-		this.state = this.state < LIT_STATES ? LIT_LONGREP : NONLIT_REP;
+		this.state = stateAfterLongRep(this.state);
 	}
 
 	updateShortRep(): void {
-		this.state = this.state < LIT_STATES ? LIT_SHORTREP : NONLIT_REP;
+		this.state = stateAfterShortRep(this.state);
 	}
 
 	isLiteral(): boolean {
-		return this.state < LIT_STATES;
+		return isLiteralState(this.state);
 	}
 }
 
@@ -128,6 +122,38 @@ const LIT_LONGREP = 8;
 const LIT_SHORTREP = 9;
 const NONLIT_MATCH = 10;
 const NONLIT_REP = 11;
+
+/*
+ * The transitions of `State` on a plain state value, so that the optimum
+ * search can keep its per-position states as numbers. `State`'s methods
+ * call these, so the state machine is written once.
+ */
+
+export function stateAfterLiteral(state: number): number {
+	if (state <= SHORTREP_LIT_LIT) {
+		return LIT_LIT;
+	} else if (state <= LIT_SHORTREP) {
+		return state - 3;
+	} else {
+		return state - 6;
+	}
+}
+
+export function stateAfterMatch(state: number): number {
+	return state < LIT_STATES ? LIT_MATCH : NONLIT_MATCH;
+}
+
+export function stateAfterLongRep(state: number): number {
+	return state < LIT_STATES ? LIT_LONGREP : NONLIT_REP;
+}
+
+export function stateAfterShortRep(state: number): number {
+	return state < LIT_STATES ? LIT_SHORTREP : NONLIT_REP;
+}
+
+export function isLiteralState(state: number): boolean {
+	return state < LIT_STATES;
+}
 
 /**
  * Layout of the probability array. All probabilities of a coder live in one

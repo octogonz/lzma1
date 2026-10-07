@@ -595,3 +595,49 @@ Argument:
   initializers read nothing, and the constructors' resets set them again before
   any use. `initialPrices` is a module variable read and written only by
   `getInitialPrices()`, which runs after the module has been evaluated.
+
+### Optimum-search states as numbers
+
+This entry only prepares the next one, which stores each position's state in a
+typed array. The coder's own state stays the Java code's `State` object, and the
+decoder and the encoder's coding paths are unchanged.
+
+Change, in `lzma-coder.ts`, `lzma-encoder.ts` and `lzma-encoder-normal.ts`:
+
+1. The bodies of `State.updateLiteral`, `updateMatch`, `updateLongRep`,
+   `updateShortRep` and `isLiteral` move into the module functions
+   `stateAfterLiteral`, `stateAfterMatch`, `stateAfterLongRep`,
+   `stateAfterShortRep` and `isLiteralState`, which take and return a state
+   value; the methods call them on their field, so the transitions are written
+   once.
+2. `Optimum.state` and `LzmaEncoderNormal.nextState` become number fields
+   holding 0, the value a new `State` holds. The price helpers
+   (`getAnyMatchPrice`, `getNormalMatchPrice`, `getAnyRepPrice`,
+   `getShortRepPrice`, `getLongRepPrice`, `getLongRepAndLenPrice`) and
+   `LiteralEncoder.getPrice` take the state as a number.
+3. Call sites on these states map one to one: `x.set(y)` becomes `x = y`,
+   `x.updateK()` becomes `x = stateAfterK(x)`, `x.isLiteral()` becomes
+   `isLiteralState(x)`, and inside the helpers `state.get()` becomes `state`.
+   Where the normal encoder passes the coder's own state (the first position of
+   each block, and `opts[0]`'s initialization), it passes `this.state.get()`.
+
+Argument:
+
+- _Each replaced object held one integer, observed through one owner._
+  `Optimum.state` and `nextState` were each created once into a `readonly` field
+  and never stored anywhere else; values moved into and out of them only through
+  `set(other)`, which copies the integer (the copying constructor has no
+  caller), and the helpers received a `State` only as a parameter read during a
+  synchronous call that mutates no state. So no two names ever referred to the
+  same object, and a number held by the same owner behaves identically.
+- _Same operations._ Each function is the body of the method of the same name
+  with `this.state` replaced by the parameter and assignments replaced by
+  returns, with the same constants, so for every input value it yields the value
+  the method would have stored. The `State` methods compute their new value
+  through the same functions, so the coder's transitions are unchanged.
+- _Same values at every read._ Every rewritten call site reads and writes the
+  same state at the same point as before: `this.state.get()` is the value the
+  helper used to read through `state.get()`, and `this.state` does not change
+  during the optimum search, which only reads it. So every probability index and
+  price derived from a state is unchanged. The values stay in 0..11 through the
+  same transitions.
