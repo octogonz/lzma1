@@ -6,32 +6,25 @@
  * shortest-path search where the edge weights are symbol prices). The
  * cheapest path is then walked backwards and returned symbol by symbol.
  *
- * Ported from XZ for Java (0BSD) by Lasse Collin and Igor Pavlov. The path
- * representation (`len`, `dist`, `extra`) follows the LZMA SDK of 7-Zip.
+ * Ported from XZ for Java (0BSD), `src/org/tukaani/xz/lzma/LZMAEncoderNormal.java`
+ * and `Optimum.java`, by Lasse Collin and Igor Pavlov.
  */
 
-import type { Matches } from "./lz-encoder.js";
-import type { LzEncoder } from "./lz-encoder.js";
+import type {
+	LzEncoder,
+	Matches,
+} from "./lz-encoder.js";
 import {
-	DIST_STATES,
-	IS_MATCH,
-	isLiteralState,
 	MATCH_LEN_MAX,
 	MATCH_LEN_MIN,
 	REPS,
-	stateAfterLiteral,
-	stateAfterLongRep,
-	stateAfterMatch,
-	stateAfterShortRep,
+	State,
 } from "./lzma-coder.js";
 import {
 	LzmaEncoder,
 	type LzmaEncoderConfig,
 } from "./lzma-encoder.js";
-import {
-	getBitPrice,
-	type RangeEncoder,
-} from "./range-encoder.js";
+import type { RangeEncoder } from "./range-encoder.js";
 
 /** Maximum number of positions optimized at once. */
 export const OPTS = 4096;
@@ -40,122 +33,138 @@ export const NORMAL_EXTRA_SIZE_AFTER = OPTS;
 
 const INFINITY_PRICE = 1 << 30;
 
-/** `dist` value of a literal (see `LzmaEncoder.back`). */
-const LITERAL = -1;
+/** The cheapest known way to arrive at one position. */
+class Optimum {
+	readonly state = new State();
+	readonly reps = new Int32Array(REPS);
 
-/**
- * The cheapest known way to reach each position, as parallel arrays
- * indexed by position ("structure of arrays"): a few allocations instead
- * of thousands of small objects, and cheap resets.
- *
- * The last step to a position is one of:
- * - `extra = 0`: one symbol `dist` of `len` bytes
- * - `extra = 1`: a literal, then a rep0 of `len` bytes
- * - `extra > 1`: symbol `dist` of `extra - 1` bytes, a literal, then a rep0
- *   of `len` bytes
- *
- * so the step starts at position `i - len - extra`.
- */
-class Optimums {
-	readonly price: Int32Array;
-	/** Coder state after reaching the position. */
-	readonly state: Uint8Array;
-	/** Rep distances after reaching the position, `[i * REPS + rep]`. */
-	readonly reps: Int32Array;
-	readonly len: Int32Array;
-	/** Symbol, as in `LzmaEncoder.back`: -1 literal, 0-3 rep, 4+ match. */
-	readonly dist: Int32Array;
-	readonly extra: Int32Array;
+	/** Cumulative price of arriving to this byte. */
+	price = 0;
 
-	constructor(size: number) {
-		this.price = new Int32Array(size);
-		this.state = new Uint8Array(size);
-		this.reps = new Int32Array(size * REPS);
-		this.len = new Int32Array(size);
-		this.dist = new Int32Array(size);
-		this.extra = new Int32Array(size);
-		this.clear();
+	optPrev = 0;
+	backPrev = 0;
+	prev1IsLiteral = false;
+
+	hasPrev2 = false;
+	optPrev2 = 0;
+	backPrev2 = 0;
+
+	/** Resets the price. */
+	reset(): void {
+		this.price = INFINITY_PRICE;
 	}
 
-	/** Returns all entries to their initial values. */
-	clear(): void {
-		this.price.fill(INFINITY_PRICE);
-		this.state.fill(0);
-		this.reps.fill(0);
-		this.len.fill(0);
-		this.dist.fill(0);
-		this.extra.fill(0);
+	/** Sets to indicate one LZMA symbol (literal, rep, or match). */
+	set1(newPrice: number, optCur: number, back: number): void {
+		this.price = newPrice;
+		this.optPrev = optCur;
+		this.backPrev = back;
+		this.prev1IsLiteral = false;
 	}
 
-	/** Position `i` is reached from `from` with the symbol `dist`. */
-	setSymbol(i: number, price: number, from: number, dist: number): void {
-		this.price[i] = price;
-		this.len[i] = i - from;
-		this.dist[i] = dist;
-		this.extra[i] = 0;
+	/** Sets to indicate two LZMA symbols of which the first one is a literal. */
+	set2(newPrice: number, optCur: number, back: number): void {
+		this.price = newPrice;
+		this.optPrev = optCur + 1;
+		this.backPrev = back;
+		this.prev1IsLiteral = true;
+		this.hasPrev2 = false;
 	}
 
-	/** Position `i` is reached from `from` with a literal and a rep0. */
-	setLiteralRep0(i: number, price: number, from: number): void {
-		this.price[i] = price;
-		this.len[i] = i - from - 1;
-		this.dist[i] = 0;
-		this.extra[i] = 1;
-	}
-
-	/** Position `i` is reached from `from` with `dist` of `len` bytes, a literal and a rep0. */
-	setSymbolLiteralRep0(i: number, price: number, from: number, dist: number, len: number): void {
-		this.price[i] = price;
-		this.len[i] = i - from - len - 1;
-		this.dist[i] = dist;
-		this.extra[i] = len + 1;
+	/**
+	 * Sets to indicate three LZMA symbols of which the second one
+	 * is a literal.
+	 */
+	set3(newPrice: number, optCur: number, back2: number, len2: number, back: number): void {
+		this.price = newPrice;
+		this.optPrev = optCur + len2 + 1;
+		this.backPrev = back;
+		this.prev1IsLiteral = true;
+		this.hasPrev2 = true;
+		this.optPrev2 = optCur;
+		this.backPrev2 = back2;
 	}
 }
 
 export interface LzmaEncoderNormalConfig extends LzmaEncoderConfig {
 	/**
 	 * Number of positions to allocate, at most `OPTS`. When the input size
-	 * is known, `inputSize + 2` is enough.
+	 * is known, `inputSize + 2` is enough (contract adaptation; the
+	 * Java code always allocates `OPTS`).
 	 */
 	optsSize: number;
 }
 
 export class LzmaEncoderNormal extends LzmaEncoder {
-	private readonly opts: Optimums;
-	/**
-	 * While optimizing: the current and the furthest reached position.
-	 * Afterwards: the next and the end index of the symbols in `opts.len`
-	 * and `opts.dist` that `backward()` stored.
-	 */
+	private readonly opts: Optimum[];
 	private optCur = 0;
 	private optEnd = 0;
+
 	private matches!: Matches;
+
+	// These are fields solely to avoid allocating the objects again and
+	// again on each function call.
 	private readonly repLens = new Int32Array(REPS);
+	private readonly nextState = new State();
 
 	constructor(rc: RangeEncoder, lz: LzEncoder, config: LzmaEncoderNormalConfig) {
 		super(rc, lz, config);
-		this.opts = new Optimums(Math.min(config.optsSize, OPTS));
+
+		const optsSize = Math.min(config.optsSize, OPTS);
+		this.opts = Array.from({ length: optsSize }, () => new Optimum());
 	}
 
 	override reset(): void {
 		this.optCur = 0;
 		this.optEnd = 0;
-		// Not initialized yet when called from the base class constructor.
-		this.opts?.clear();
 		super.reset();
 	}
 
-	protected getNextSymbol(): number {
-		const opts = this.opts;
-		const lz = this.lz;
-		const reps = this.reps;
-		const repLens = this.repLens;
+	/**
+	 * Converts the opts array from backward indexes to forward indexes.
+	 * Then it will be simple to get the next symbol from the array
+	 * in later calls to `getNextSymbol()`.
+	 */
+	private convertOpts(): number {
+		this.optEnd = this.optCur;
 
-		// Return symbols left over from the previous optimization first.
+		let optPrev = this.opts[this.optCur].optPrev;
+
+		do {
+			const opt = this.opts[this.optCur];
+
+			if (opt.prev1IsLiteral) {
+				this.opts[optPrev].optPrev = this.optCur;
+				this.opts[optPrev].backPrev = -1;
+				this.optCur = optPrev--;
+
+				if (opt.hasPrev2) {
+					this.opts[optPrev].optPrev = optPrev + 1;
+					this.opts[optPrev].backPrev = opt.backPrev2;
+					this.optCur = optPrev;
+					optPrev = opt.optPrev2;
+				}
+			}
+
+			const temp = this.opts[optPrev].optPrev;
+			this.opts[optPrev].optPrev = this.optCur;
+			this.optCur = optPrev;
+			optPrev = temp;
+		} while (this.optCur > 0);
+
+		this.optCur = this.opts[0].optPrev;
+		this.back = this.opts[this.optCur].backPrev;
+		return this.optCur;
+	}
+
+	protected getNextSymbol(): number {
+		// If there are pending symbols from an earlier call to this
+		// function, return those symbols first.
 		if (this.optCur < this.optEnd) {
-			const i = this.optCur++;
-			this.back = opts.dist[i];
-			return opts.len[i];
+			const len = this.opts[this.optCur].optPrev - this.optCur;
+			this.optCur = this.opts[this.optCur].optPrev;
+			this.back = this.opts[this.optCur].backPrev;
+			return len;
 		}
 
 		this.optCur = 0;
@@ -166,43 +175,46 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			this.matches = this.getMatches();
 		}
 
-		// Not enough bytes left for a match: encode a literal.
-		let avail = Math.min(lz.getAvail(), MATCH_LEN_MAX);
+		// Get the number of bytes available in the dictionary, but
+		// not more than the maximum match length. If there aren't
+		// enough bytes remaining to encode a match at all, return
+		// immediately to encode this byte as a literal.
+		let avail = Math.min(this.lz.getAvail(), MATCH_LEN_MAX);
 		if (avail < MATCH_LEN_MIN) {
 			return 1;
 		}
 
-		// Lengths of the rep matches.
+		// Get the lengths of repeated matches.
 		let repBest = 0;
 		for (let rep = 0; rep < REPS; ++rep) {
-			repLens[rep] = lz.getMatchLen(0, reps[rep], avail);
+			this.repLens[rep] = this.lz.getMatchLen(0, this.reps[rep], avail);
 
-			if (repLens[rep] < MATCH_LEN_MIN) {
-				repLens[rep] = 0;
+			if (this.repLens[rep] < MATCH_LEN_MIN) {
+				this.repLens[rep] = 0;
 				continue;
 			}
 
-			if (repLens[rep] > repLens[repBest]) {
+			if (this.repLens[rep] > this.repLens[repBest]) {
 				repBest = rep;
 			}
 		}
 
-		// A long enough rep match is taken without further search.
-		if (repLens[repBest] >= this.niceLen) {
+		// Return if the best repeated match is at least niceLen bytes long.
+		if (this.repLens[repBest] >= this.niceLen) {
 			this.back = repBest;
-			this.skip(repLens[repBest] - 1);
-			return repLens[repBest];
+			this.skip(this.repLens[repBest] - 1);
+			return this.repLens[repBest];
 		}
 
-		// Longest match from the match finder.
+		// Initialize mainLen and mainDist to the longest match found
+		// by the match finder.
 		let mainLen = 0;
 		let mainDist = 0;
-		const matches = this.matches;
+		if (this.matches.count > 0) {
+			mainLen = this.matches.len[this.matches.count - 1];
+			mainDist = this.matches.dist[this.matches.count - 1];
 
-		if (matches.count > 0) {
-			mainLen = matches.len[matches.count - 1];
-			mainDist = matches.dist[matches.count - 1];
-
+			// Return if it is at least niceLen bytes long.
 			if (mainLen >= this.niceLen) {
 				this.back = mainDist + REPS;
 				this.skip(mainLen - 1);
@@ -210,92 +222,102 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			}
 		}
 
-		const curByte = lz.getByte(0);
-		const matchByte = lz.getByte(reps[0] + 1);
+		const curByte = this.lz.getByte(0);
+		const matchByte = this.lz.getByte(this.reps[0] + 1);
 
-		// Neither a match nor a short rep is possible: encode a literal.
-		if (mainLen < MATCH_LEN_MIN && curByte !== matchByte && repLens[repBest] < MATCH_LEN_MIN) {
+		// If the match finder found no matches and this byte cannot be
+		// encoded as a repeated match (short or long), we must be return
+		// to have the byte encoded as a literal.
+		if (mainLen < MATCH_LEN_MIN && curByte !== matchByte && this.repLens[repBest] < MATCH_LEN_MIN) {
 			return 1;
 		}
 
-		let pos = lz.getPos();
+		let pos = this.lz.getPos();
 		let posState = pos & this.posMask;
 
-		// Price of the current byte as a literal.
+		// Calculate the price of encoding the current byte as a literal.
 		{
-			const prevByte = lz.getByte(1);
-			const literalPrice = this.getLiteralPrice(curByte, matchByte, prevByte, pos, this.state);
-			opts.setSymbol(1, literalPrice, 0, LITERAL);
+			const prevByte = this.lz.getByte(1);
+			const literalPrice = this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos, this.state);
+			this.opts[1].set1(literalPrice, 0, -1);
 		}
 
 		let anyMatchPrice = this.getAnyMatchPrice(this.state, posState);
 		let anyRepPrice = this.getAnyRepPrice(anyMatchPrice, this.state);
 
-		// A short rep (one byte at rep0) may be cheaper than the literal.
+		// If it is possible to encode this byte as a short rep, see if
+		// it is cheaper than encoding it as a literal.
 		if (matchByte === curByte) {
 			const shortRepPrice = this.getShortRepPrice(anyRepPrice, this.state, posState);
-			if (shortRepPrice < opts.price[1]) {
-				opts.setSymbol(1, shortRepPrice, 0, 0);
+			if (shortRepPrice < this.opts[1].price) {
+				this.opts[1].set1(shortRepPrice, 0, 0);
 			}
 		}
 
-		// No match of two or more bytes: use the literal or the short rep.
-		this.optEnd = Math.max(mainLen, repLens[repBest]);
+		// Return if there is neither normal nor long repeated match. Use
+		// a short match instead of a literal if is is possible and cheaper.
+		this.optEnd = Math.max(mainLen, this.repLens[repBest]);
 		if (this.optEnd < MATCH_LEN_MIN) {
-			this.back = opts.dist[1];
+			this.back = this.opts[1].backPrev;
 			return 1;
 		}
 
-		// The price functions below use the cached tables.
+		// Update the lookup tables for distances and lengths before using
+		// those price calculation functions. (The price function above
+		// don't need these tables.)
 		this.updatePrices();
 
-		opts.state[0] = this.state;
-		opts.reps[0] = reps[0];
-		opts.reps[1] = reps[1];
-		opts.reps[2] = reps[2];
-		opts.reps[3] = reps[3];
+		// Initialize the state and reps of this position in opts[].
+		// updateOptStateAndReps() will need these to get the new
+		// state and reps for the next byte.
+		this.opts[0].state.set(this.state);
+		this.opts[0].reps.set(this.reps);
 
+		// Initialize the prices for latter opts that will be used below.
 		for (let i = this.optEnd; i >= MATCH_LEN_MIN; --i) {
-			opts.price[i] = INFINITY_PRICE;
+			this.opts[i].reset();
 		}
 
-		// Prices of rep matches of all lengths.
+		// Calculate the prices of repeated matches of all lengths.
 		for (let rep = 0; rep < REPS; ++rep) {
-			let repLen = repLens[rep];
-			if (repLen < MATCH_LEN_MIN) continue;
+			let repLen = this.repLens[rep];
+			if (repLen < MATCH_LEN_MIN) {
+				continue;
+			}
 
 			const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, this.state, posState);
-
 			do {
 				const price = longRepPrice + this.repLenEncoder.getPrice(repLen, posState);
-				if (price < opts.price[repLen]) {
-					opts.setSymbol(repLen, price, 0, rep);
+				if (price < this.opts[repLen].price) {
+					this.opts[repLen].set1(price, 0, rep);
 				}
 			} while (--repLen >= MATCH_LEN_MIN);
 		}
 
-		// Prices of normal matches longer than rep0.
+		// Calculate the prices of normal matches that are longer than rep0.
 		{
-			let len = Math.max(repLens[0] + 1, MATCH_LEN_MIN);
-
+			let len = Math.max(this.repLens[0] + 1, MATCH_LEN_MIN);
 			if (len <= mainLen) {
 				const normalMatchPrice = this.getNormalMatchPrice(anyMatchPrice, this.state);
 
-				// Index of the shortest match that is at least `len` bytes.
+				// Set i to the index of the shortest match that is
+				// at least len bytes long.
 				let i = 0;
-				while (len > matches.len[i]) {
+				while (len > this.matches.len[i]) {
 					++i;
 				}
 
 				while (true) {
-					const dist = matches.dist[i];
+					const dist = this.matches.dist[i];
 					const price = this.getMatchAndLenPrice(normalMatchPrice, dist, len, posState);
-					if (price < opts.price[len]) {
-						opts.setSymbol(len, price, 0, dist + REPS);
+					if (price < this.opts[len].price) {
+						this.opts[len].set1(price, 0, dist + REPS);
 					}
 
-					if (len === matches.len[i] && ++i === matches.count) {
-						break;
+					if (len === this.matches.len[i]) {
+						if (++i === this.matches.count) {
+							break;
+						}
 					}
 
 					++len;
@@ -303,12 +325,13 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			}
 		}
 
-		avail = Math.min(lz.getAvail(), OPTS - 1);
+		avail = Math.min(this.lz.getAvail(), OPTS - 1);
 
-		// Walk forward, extending the cheapest paths from each position.
+		// Get matches for later bytes and optimize the use of LZMA symbols
+		// by calculating the prices and picking the cheapest symbol
+		// combinations.
 		while (++this.optCur < this.optEnd) {
 			this.matches = this.getMatches();
-
 			if (this.matches.count > 0 && this.matches.len[this.matches.count - 1] >= this.niceLen) {
 				break;
 			}
@@ -318,224 +341,166 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 			posState = pos & this.posMask;
 
 			this.updateOptStateAndReps();
-			const state = opts.state[this.optCur];
-			anyMatchPrice = opts.price[this.optCur] + this.getAnyMatchPrice(state, posState);
-			anyRepPrice = this.getAnyRepPrice(anyMatchPrice, state);
+			anyMatchPrice = this.opts[this.optCur].price
+				+ this.getAnyMatchPrice(this.opts[this.optCur].state, posState);
+			anyRepPrice = this.getAnyRepPrice(anyMatchPrice, this.opts[this.optCur].state);
 
 			this.calc1BytePrices(pos, posState, avail, anyRepPrice);
 
 			if (avail >= MATCH_LEN_MIN) {
 				const startLen = this.calcLongRepPrices(pos, posState, avail, anyRepPrice);
-
 				if (this.matches.count > 0) {
 					this.calcNormalMatchPrices(pos, posState, avail, anyMatchPrice, startLen);
 				}
 			}
 		}
 
-		return this.backward(this.optCur);
+		return this.convertOpts();
 	}
 
-	/**
-	 * Walks the cheapest path to `end` backwards and stores its symbols in
-	 * forward order in `opts.len` and `opts.dist`, from index `optCur` to
-	 * `optEnd`. Sets `back` and returns the length of the first symbol.
-	 */
-	private backward(end: number): number {
-		const { len: lens, dist: dists, extra: extras } = this.opts;
-		let cur = end;
-		let write = end + 1;
-		this.optEnd = write;
+	/** Updates the state and reps for the current byte in the opts array. */
+	private updateOptStateAndReps(): void {
+		let optPrev = this.opts[this.optCur].optPrev;
 
-		while (true) {
-			let dist = dists[cur];
-			let len = lens[cur];
-			const extra = extras[cur];
-			cur -= len;
+		if (this.opts[this.optCur].prev1IsLiteral) {
+			--optPrev;
 
-			if (extra !== 0) {
-				// The rep0 at the end of the step...
-				lens[--write] = len;
-				dists[write] = 0;
-				cur -= extra;
-				len = extra;
-
-				if (extra === 1) {
-					// ...after a literal.
-					dist = LITERAL;
+			if (this.opts[this.optCur].hasPrev2) {
+				this.opts[this.optCur].state.set(this.opts[this.opts[this.optCur].optPrev2].state);
+				if (this.opts[this.optCur].backPrev2 < REPS) {
+					this.opts[this.optCur].state.updateLongRep();
 				} else {
-					// ...after a literal after the symbol `dist`.
-					lens[--write] = 1;
-					dists[write] = LITERAL;
-					--len;
+					this.opts[this.optCur].state.updateMatch();
+				}
+			} else {
+				this.opts[this.optCur].state.set(this.opts[optPrev].state);
+			}
+
+			this.opts[this.optCur].state.updateLiteral();
+		} else {
+			this.opts[this.optCur].state.set(this.opts[optPrev].state);
+		}
+
+		if (optPrev === this.optCur - 1) {
+			// Must be either a short rep or a literal.
+			if (this.opts[this.optCur].backPrev === 0) {
+				this.opts[this.optCur].state.updateShortRep();
+			} else {
+				this.opts[this.optCur].state.updateLiteral();
+			}
+
+			this.opts[this.optCur].reps.set(this.opts[optPrev].reps);
+		} else {
+			let back: number;
+			if (this.opts[this.optCur].prev1IsLiteral && this.opts[this.optCur].hasPrev2) {
+				optPrev = this.opts[this.optCur].optPrev2;
+				back = this.opts[this.optCur].backPrev2;
+				this.opts[this.optCur].state.updateLongRep();
+			} else {
+				back = this.opts[this.optCur].backPrev;
+				if (back < REPS) {
+					this.opts[this.optCur].state.updateLongRep();
+				} else {
+					this.opts[this.optCur].state.updateMatch();
 				}
 			}
 
-			if (cur === 0) {
-				this.optCur = write;
-				this.back = dist;
-				return len;
-			}
+			if (back < REPS) {
+				this.opts[this.optCur].reps[0] = this.opts[optPrev].reps[back];
 
-			lens[--write] = len;
-			dists[write] = dist;
+				let rep: number;
+				for (rep = 1; rep <= back; ++rep) {
+					this.opts[this.optCur].reps[rep] = this.opts[optPrev].reps[rep - 1];
+				}
+
+				for (; rep < REPS; ++rep) {
+					this.opts[this.optCur].reps[rep] = this.opts[optPrev].reps[rep];
+				}
+			} else {
+				this.opts[this.optCur].reps[0] = back - REPS;
+				this.opts[this.optCur].reps.set(this.opts[optPrev].reps.subarray(0, REPS - 1), 1);
+			}
 		}
 	}
 
-	/** Derives the state and reps at `optCur` from the step that reaches it. */
-	private updateOptStateAndReps(): void {
-		const { state: states, reps, len: lens, dist: dists, extra: extras } = this.opts;
-		const cur = this.optCur;
-		const len = lens[cur];
-		const dist = dists[cur];
-		const extra = extras[cur];
-		const prev = cur - len - extra;
-		const to = cur * REPS;
-		const from = prev * REPS;
-		let state = states[prev];
-
-		if (extra === 0) {
-			if (len === 1) {
-				// A literal or a short rep: the reps don't change.
-				states[cur] = dist === LITERAL ? stateAfterLiteral(state) : stateAfterShortRep(state);
-				reps[to] = reps[from];
-				reps[to + 1] = reps[from + 1];
-				reps[to + 2] = reps[from + 2];
-				reps[to + 3] = reps[from + 3];
-				return;
-			}
-
-			state = dist < REPS ? stateAfterLongRep(state) : stateAfterMatch(state);
-		} else {
-			if (extra > 1) {
-				state = dist < REPS ? stateAfterLongRep(state) : stateAfterMatch(state);
-			}
-			// The literal and the rep0.
-			state = stateAfterLongRep(stateAfterLiteral(state));
-		}
-
-		states[cur] = state;
-
-		// The rep0 at the end of a step doesn't change the reps, the
-		// symbol `dist` does.
-		if (dist < REPS) {
-			// Move the used rep to the front.
-			reps[to] = reps[from + dist];
-			let rep = 1;
-			for (; rep <= dist; ++rep) {
-				reps[to + rep] = reps[from + rep - 1];
-			}
-			for (; rep < REPS; ++rep) {
-				reps[to + rep] = reps[from + rep];
-			}
-		} else {
-			reps[to] = dist - REPS;
-			reps[to + 1] = reps[from];
-			reps[to + 2] = reps[from + 1];
-			reps[to + 3] = reps[from + 2];
-		}
-	}
-
-	/**
-	 * Prices of a literal, a short rep, and a literal + rep0.
-	 *
-	 * Candidates that can't be the cheapest are skipped without computing
-	 * their price, as in the LZMA SDK since 7-Zip 18.
-	 */
+	/** Calculates prices of a literal, a short rep, and literal + rep0. */
 	private calc1BytePrices(pos: number, posState: number, avail: number, anyRepPrice: number): void {
-		const opts = this.opts;
-		const lz = this.lz;
-		const cur = this.optCur;
-		const next = cur + 1;
-		const nextPrice = opts.price[next];
-		const state = opts.state[cur];
-		const rep0 = opts.reps[cur * REPS];
+		// This will be set to true if using a literal or a short rep.
 		let nextIsByte = false;
 
-		const curByte = lz.getByte(0);
-		const matchByte = lz.getByte(rep0 + 1);
+		const curByte = this.lz.getByte(0);
+		const matchByte = this.lz.getByte(this.opts[this.optCur].reps[0] + 1);
 
-		// Literal: skipped if `next` is reached already and a short rep is
-		// possible, or if even the price of the "literal" flag is too high.
-		// Then the literal + rep0 is skipped too.
-		let literalPrice = 0;
-		const literalFlagPrice = opts.price[cur] + getBitPrice(this.probs[IS_MATCH + (state << 4) + posState], 0);
-
-		if (!(nextPrice < INFINITY_PRICE && matchByte === curByte) && literalFlagPrice <= nextPrice) {
-			literalPrice = opts.price[cur] + this.getLiteralPrice(curByte, matchByte, lz.getByte(1), pos, state);
-			if (literalPrice < opts.price[next]) {
-				opts.setSymbol(next, literalPrice, cur, LITERAL);
-				nextIsByte = true;
-			}
+		// Try a literal.
+		const literalPrice = this.opts[this.optCur].price
+			+ this.literalEncoder.getPrice(curByte, matchByte, this.lz.getByte(1), pos, this.opts[this.optCur].state);
+		if (literalPrice < this.opts[this.optCur + 1].price) {
+			this.opts[this.optCur + 1].set1(literalPrice, this.optCur, -1);
+			nextIsByte = true;
 		}
 
-		// Short rep: only after a literal, and only if the "rep" flags alone
-		// are cheaper than the current price of `next`. As in XZ for Java,
-		// only if `next` is reached with a single symbol that is from here,
-		// or that isn't a rep0.
+		// Try a short rep.
 		if (
 			matchByte === curByte
-			&& isLiteralState(state)
-			&& anyRepPrice < opts.price[next]
-			&& opts.extra[next] === 0
-			&& (opts.len[next] === 1 || opts.dist[next] !== 0)
+			&& (this.opts[this.optCur + 1].optPrev === this.optCur
+				|| this.opts[this.optCur + 1].backPrev !== 0)
 		) {
-			const shortRepPrice = this.getShortRepPrice(anyRepPrice, state, posState);
-			if (shortRepPrice <= opts.price[next]) {
-				opts.setSymbol(next, shortRepPrice, cur, 0);
+			const shortRepPrice = this.getShortRepPrice(anyRepPrice, this.opts[this.optCur].state, posState);
+			if (shortRepPrice <= this.opts[this.optCur + 1].price) {
+				this.opts[this.optCur + 1].set1(shortRepPrice, this.optCur, 0);
 				nextIsByte = true;
 			}
 		}
 
-		// Literal + rep0, if neither of the above was the cheapest.
-		if (!nextIsByte && literalPrice !== 0 && matchByte !== curByte && avail > MATCH_LEN_MIN) {
+		// If neither a literal nor a short rep was the cheapest choice,
+		// try literal + long rep0.
+		if (!nextIsByte && matchByte !== curByte && avail > MATCH_LEN_MIN) {
 			const lenLimit = Math.min(this.niceLen, avail - 1);
-			const len = lz.getMatchLen(1, rep0, lenLimit);
+			const len = this.lz.getMatchLen(1, this.opts[this.optCur].reps[0], lenLimit);
 
 			if (len >= MATCH_LEN_MIN) {
-				const nextState = stateAfterLiteral(state);
+				this.nextState.set(this.opts[this.optCur].state);
+				this.nextState.updateLiteral();
 				const nextPosState = (pos + 1) & this.posMask;
-				const price = literalPrice + this.getLongRepAndLenPrice(0, len, nextState, nextPosState);
+				const price = literalPrice
+					+ this.getLongRepAndLenPrice(0, len, this.nextState, nextPosState);
 
-				const i = next + len;
-				this.extendOptEnd(i);
-				if (price < opts.price[i]) {
-					opts.setLiteralRep0(i, price, cur);
+				const i = this.optCur + 1 + len;
+				while (this.optEnd < i) {
+					this.opts[++this.optEnd].reset();
+				}
+
+				if (price < this.opts[i].price) {
+					this.opts[i].set2(price, this.optCur, 0);
 				}
 			}
 		}
 	}
 
 	/**
-	 * Prices of long reps and long rep + literal + rep0.
-	 *
-	 * @returns the shortest normal match length worth checking
+	 * Calculates prices of long rep and long rep + literal + rep0.
 	 */
 	private calcLongRepPrices(pos: number, posState: number, avail: number, anyRepPrice: number): number {
-		const opts = this.opts;
-		const optPrice = opts.price;
-		const lz = this.lz;
-		const cur = this.optCur;
-		const state = opts.state[cur];
-		const repsOffset = cur * REPS;
 		let startLen = MATCH_LEN_MIN;
 		const lenLimit = Math.min(avail, this.niceLen);
 
 		for (let rep = 0; rep < REPS; ++rep) {
-			const dist = opts.reps[repsOffset + rep];
-			const len = lz.getMatchLen(0, dist, lenLimit);
-			if (len < MATCH_LEN_MIN) continue;
+			const len = this.lz.getMatchLen(0, this.opts[this.optCur].reps[rep], lenLimit);
+			if (len < MATCH_LEN_MIN) {
+				continue;
+			}
 
-			this.extendOptEnd(cur + len);
+			while (this.optEnd < this.optCur + len) {
+				this.opts[++this.optEnd].reset();
+			}
 
-			const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, state, posState);
+			const longRepPrice = this.getLongRepPrice(anyRepPrice, rep, this.opts[this.optCur].state, posState);
 
-			const lenPrices = this.repLenEncoder.prices;
-			const lenOffset = this.repLenEncoder.priceOffset(posState);
 			for (let i = len; i >= MATCH_LEN_MIN; --i) {
-				const price = longRepPrice + lenPrices[lenOffset + i];
-				if (price < optPrice[cur + i]) {
-					opts.setSymbol(cur + i, price, cur, rep);
+				const price = longRepPrice
+					+ this.repLenEncoder.getPrice(i, posState);
+				if (price < this.opts[this.optCur + i].price) {
+					this.opts[this.optCur + i].set1(price, this.optCur, rep);
 				}
 			}
 
@@ -543,131 +508,131 @@ export class LzmaEncoderNormal extends LzmaEncoder {
 				startLen = len + 1;
 			}
 
-			const len2Limit = Math.min(avail - len - 1, this.niceLen);
-			if (len2Limit < MATCH_LEN_MIN) continue;
+			let len2Limit = avail - len - 1;
+			if (len2Limit < MATCH_LEN_MIN) {
+				continue;
+			}
 
-			const len2 = lz.getMatchLen(len + 1, dist, len2Limit);
-			if (len2 < MATCH_LEN_MIN) continue;
+			if (len2Limit > this.niceLen) {
+				len2Limit = this.niceLen;
+			}
 
-			// Rep
-			let price = longRepPrice + this.repLenEncoder.getPrice(len, posState);
-			let nextState = stateAfterLongRep(state);
+			const len2 = this.lz.getMatchLen(len + 1, this.opts[this.optCur].reps[rep], len2Limit);
 
-			// Literal
-			const curByte = lz.getByteAt(len, 0);
-			const matchByte = lz.getByte(0); // same as lz.getByteAt(len, len)
-			const prevByte = lz.getByteAt(len, 1);
-			price += this.getLiteralPrice(curByte, matchByte, prevByte, pos + len, nextState);
-			nextState = stateAfterLiteral(nextState);
+			if (len2 >= MATCH_LEN_MIN) {
+				// Rep
+				let price = longRepPrice
+					+ this.repLenEncoder.getPrice(len, posState);
+				this.nextState.set(this.opts[this.optCur].state);
+				this.nextState.updateLongRep();
 
-			// Rep0
-			const nextPosState = (pos + len + 1) & this.posMask;
-			price += this.getLongRepAndLenPrice(0, len2, nextState, nextPosState);
+				// Literal
+				const curByte = this.lz.getByteAt(len, 0);
+				const matchByte = this.lz.getByte(0); // lz.getByteAt(len, len)
+				const prevByte = this.lz.getByteAt(len, 1);
+				price += this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos + len, this.nextState);
+				this.nextState.updateLiteral();
 
-			const i = cur + len + 1 + len2;
-			this.extendOptEnd(i);
-			if (price < optPrice[i]) {
-				opts.setSymbolLiteralRep0(i, price, cur, rep, len);
+				// Rep0
+				const nextPosState = (pos + len + 1) & this.posMask;
+				price += this.getLongRepAndLenPrice(0, len2, this.nextState, nextPosState);
+
+				const i = this.optCur + len + 1 + len2;
+				while (this.optEnd < i) {
+					this.opts[++this.optEnd].reset();
+				}
+
+				if (price < this.opts[i].price) {
+					this.opts[i].set3(price, this.optCur, rep, len, 0);
+				}
 			}
 		}
 
 		return startLen;
 	}
 
-	/** Prices of normal matches and match + literal + rep0. */
+	/**
+	 * Calculates prices of a normal match and normal match + literal + rep0.
+	 */
 	private calcNormalMatchPrices(pos: number, posState: number, avail: number, anyMatchPrice: number, startLen: number): void {
-		const opts = this.opts;
-		const optPrice = opts.price;
-		const lz = this.lz;
-		const cur = this.optCur;
-		const state = opts.state[cur];
-		const matches = this.matches;
-		const matchLens = matches.len;
-		const matchDists = matches.dist;
-
-		// Shorten the matches that don't fit into the remaining input.
-		if (matchLens[matches.count - 1] > avail) {
-			matches.count = 0;
-			while (matchLens[matches.count] < avail) {
-				++matches.count;
+		// If the longest match is so long that it would not fit into
+		// the opts array, shorten the matches.
+		if (this.matches.len[this.matches.count - 1] > avail) {
+			this.matches.count = 0;
+			while (this.matches.len[this.matches.count] < avail) {
+				++this.matches.count;
 			}
-			matchLens[matches.count++] = avail;
+
+			this.matches.len[this.matches.count++] = avail;
 		}
 
-		const count = matches.count;
-		if (matchLens[count - 1] < startLen) {
+		if (this.matches.len[this.matches.count - 1] < startLen) {
 			return;
 		}
 
-		this.extendOptEnd(cur + matchLens[count - 1]);
+		while (this.optEnd < this.optCur + this.matches.len[this.matches.count - 1]) {
+			this.opts[++this.optEnd].reset();
+		}
 
-		const normalMatchPrice = this.getNormalMatchPrice(anyMatchPrice, state);
+		const normalMatchPrice = this.getNormalMatchPrice(anyMatchPrice, this.opts[this.optCur].state);
 
 		let match = 0;
-		while (startLen > matchLens[match]) {
+		while (startLen > this.matches.len[match]) {
 			++match;
 		}
 
-		const lenPrices = this.matchLenEncoder.prices;
-		const lenOffset = this.matchLenEncoder.priceOffset(posState);
-		let dist = matchDists[match];
-		// Distances of matches of 5+ bytes share one price (distance state 3).
-		let longDistPrice = this.getDistPrice(DIST_STATES - 1, dist);
-
 		for (let len = startLen;; ++len) {
-			// Match of `len` bytes from the nearest possible distance.
-			const distPrice = len < DIST_STATES + MATCH_LEN_MIN ? this.getDistPrice(len - MATCH_LEN_MIN, dist) : longDistPrice;
-			const matchAndLenPrice = normalMatchPrice + lenPrices[lenOffset + len] + distPrice;
-			if (matchAndLenPrice < optPrice[cur + len]) {
-				opts.setSymbol(cur + len, matchAndLenPrice, cur, dist + REPS);
+			const dist = this.matches.dist[match];
+
+			// Calculate the price of a match of len bytes from the nearest
+			// possible distance.
+			const matchAndLenPrice = this.getMatchAndLenPrice(normalMatchPrice, dist, len, posState);
+			if (matchAndLenPrice < this.opts[this.optCur + len].price) {
+				this.opts[this.optCur + len].set1(matchAndLenPrice, this.optCur, dist + REPS);
 			}
 
-			if (len !== matchLens[match]) {
+			if (len !== this.matches.len[match]) {
 				continue;
 			}
 
-			// Match + literal + rep0
-			const len2Limit = Math.min(avail - len - 1, this.niceLen);
+			// Try match + literal + rep0. First get the length of the rep0.
+			let len2Limit = avail - len - 1;
 			if (len2Limit >= MATCH_LEN_MIN) {
-				const len2 = lz.getMatchLen(len + 1, dist, len2Limit);
+				if (len2Limit > this.niceLen) {
+					len2Limit = this.niceLen;
+				}
 
+				const len2 = this.lz.getMatchLen(len + 1, dist, len2Limit);
 				if (len2 >= MATCH_LEN_MIN) {
-					let nextState = stateAfterMatch(state);
+					this.nextState.set(this.opts[this.optCur].state);
+					this.nextState.updateMatch();
 
 					// Literal
-					const curByte = lz.getByteAt(len, 0);
-					const matchByte = lz.getByte(0); // same as lz.getByteAt(len, len)
-					const prevByte = lz.getByteAt(len, 1);
-					let price = matchAndLenPrice + this.getLiteralPrice(curByte, matchByte, prevByte, pos + len, nextState);
-					nextState = stateAfterLiteral(nextState);
+					const curByte = this.lz.getByteAt(len, 0);
+					const matchByte = this.lz.getByte(0); // lz.getByteAt(len, len)
+					const prevByte = this.lz.getByteAt(len, 1);
+					let price = matchAndLenPrice
+						+ this.literalEncoder.getPrice(curByte, matchByte, prevByte, pos + len, this.nextState);
+					this.nextState.updateLiteral();
 
 					// Rep0
 					const nextPosState = (pos + len + 1) & this.posMask;
-					price += this.getLongRepAndLenPrice(0, len2, nextState, nextPosState);
+					price += this.getLongRepAndLenPrice(0, len2, this.nextState, nextPosState);
 
-					const i = cur + len + 1 + len2;
-					this.extendOptEnd(i);
-					if (price < optPrice[i]) {
-						opts.setSymbolLiteralRep0(i, price, cur, dist + REPS, len);
+					const i = this.optCur + len + 1 + len2;
+					while (this.optEnd < i) {
+						this.opts[++this.optEnd].reset();
+					}
+
+					if (price < this.opts[i].price) {
+						this.opts[i].set3(price, this.optCur, dist + REPS, len, 0);
 					}
 				}
 			}
 
-			if (++match === count) {
+			if (++match === this.matches.count) {
 				break;
 			}
-
-			dist = matchDists[match];
-			longDistPrice = this.getDistPrice(DIST_STATES - 1, dist);
-		}
-	}
-
-	/** Grows the optimized range to `end`, resetting the new entries. */
-	private extendOptEnd(end: number): void {
-		// A loop, because fill() is a native call, slow for the few entries added here.
-		const price = this.opts.price;
-		while (this.optEnd < end) {
-			price[++this.optEnd] = INFINITY_PRICE;
 		}
 	}
 }

@@ -46,6 +46,16 @@ cases carry the class (`deviation`) and the library's own outcome (`port`):
   corruption did change the output: the stream is accepted at the declared
   length with wrong bytes. Its members are listed one by one in `generate.ts`.
 
+## How the fixtures are checked
+
+`src/xz-java-identity_test.ts` runs the checks in `identity.ts` on Bun, as CI
+does, and `node fixtures/verify.ts` runs the same checks on Node (V8): every
+fixture's hash against `manifest.json`, `compress()` against every fixture byte
+for byte (each compressed twice in a row, so encoders reused from the pool are
+checked too), `decompress()` of every fixture against its input, and every
+malformed case against its recorded outcome, with the expected count of each
+class.
+
 ## CI never needs Java
 
 CI compares against the **committed** fixtures; it does not invoke XZ for Java.
