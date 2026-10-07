@@ -98,26 +98,26 @@ export class RangeDecoder {
 		return bit;
 	}
 
-	decodeBitTree(probs: Probs): number {
+	decodeBitTree(probs: Probs, offset: number, bits: number): number {
 		let symbol = 1;
 
 		do {
-			symbol = (symbol << 1) | this.decodeBit(probs, symbol);
-		} while (symbol < probs.length);
+			symbol = (symbol << 1) | this.decodeBit(probs, offset + symbol);
+		} while (symbol < 1 << bits);
 
-		return symbol - probs.length;
+		return symbol - (1 << bits);
 	}
 
-	decodeReverseBitTree(probs: Probs): number {
+	decodeReverseBitTree(probs: Probs, offset: number, bits: number): number {
 		let symbol = 1;
 		let i = 0;
 		let result = 0;
 
 		do {
-			const bit = this.decodeBit(probs, symbol);
+			const bit = this.decodeBit(probs, offset + symbol);
 			symbol = (symbol << 1) | bit;
 			result |= bit << i++;
-		} while (symbol < probs.length);
+		} while (symbol < 1 << bits);
 
 		return result;
 	}

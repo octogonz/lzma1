@@ -21,21 +21,40 @@ import {
 	ALIGN_BITS,
 	ALIGN_MASK,
 	ALIGN_SIZE,
+	DIST_ALIGN,
 	DIST_MODEL_END,
 	DIST_MODEL_START,
+	DIST_SLOT_BITS,
+	DIST_SLOT_OFFSET,
 	DIST_STATES,
+	distSpecialOffset,
 	FULL_DISTANCES,
 	getDistState,
+	IS_MATCH,
+	IS_REP,
+	IS_REP0,
+	IS_REP0_LONG,
+	IS_REP1,
+	IS_REP2,
+	LEN_CHOICE,
+	LEN_CHOICE2,
+	LEN_HIGH,
+	LEN_LOW,
+	LEN_MID,
 	LengthCoder,
+	LITERAL,
 	LiteralCoder,
 	LiteralSubcoder,
 	LOW_SYMBOLS,
 	LzmaCoder,
+	MATCH_LEN,
 	MATCH_LEN_MIN,
 	MID_SYMBOLS,
+	REP_LEN,
 	REPS,
 	State,
 } from "./lzma-coder.js";
+import type { Probs } from "./range-coder.js";
 import {
 	getBitPrice,
 	getBitTreePrice,
@@ -95,14 +114,14 @@ export abstract class LzmaEncoder extends LzmaCoder {
 	readAhead = -1;
 
 	constructor(rc: RangeEncoder, lz: LzEncoder, config: LzmaEncoderConfig) {
-		super(config.pb);
+		super(config.lc, config.lp, config.pb);
 		this.rc = rc;
 		this.lz = lz;
 		this.niceLen = config.niceLen;
 
 		this.literalEncoder = new LiteralEncoder(this, config.lc, config.lp);
-		this.matchLenEncoder = new LengthEncoder(config.pb, config.niceLen);
-		this.repLenEncoder = new LengthEncoder(config.pb, config.niceLen);
+		this.matchLenEncoder = new LengthEncoder(this.probs, MATCH_LEN, config.pb, config.niceLen);
+		this.repLenEncoder = new LengthEncoder(this.probs, REP_LEN, config.pb, config.niceLen);
 
 		this.distSlotPricesSize = getDistSlot(config.dictSize - 1) + 1;
 		this.distSlotPrices = newPriceArray(DIST_STATES, this.distSlotPricesSize);
@@ -167,8 +186,8 @@ export abstract class LzmaEncoder extends LzmaCoder {
 		// Distance is a 32-bit unsigned integer in LZMA.
 		// As an int32, UINT32_MAX becomes -1.
 		const posState = (this.lz.getPos() - this.readAhead) & this.posMask;
-		this.rc.encodeBit(this.isMatch[this.state.get()], posState, 1);
-		this.rc.encodeBit(this.isRep, this.state.get(), 0);
+		this.rc.encodeBit(this.probs, IS_MATCH + (this.state.get() << 4) + posState, 1);
+		this.rc.encodeBit(this.probs, IS_REP + this.state.get(), 0);
 		this.encodeMatch(-1, MATCH_LEN_MIN, posState);
 	}
 
@@ -179,7 +198,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 		// The first symbol must be a literal.
 		this.skip(1);
-		this.rc.encodeBit(this.isMatch[this.state.get()], 0, 0);
+		this.rc.encodeBit(this.probs, IS_MATCH + (this.state.get() << 4), 0);
 		this.literalEncoder.encodeInit(this.rc);
 
 		--this.readAhead;
@@ -198,19 +217,19 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 		if (this.back === -1) {
 			// Literal i.e. eight-bit byte
-			this.rc.encodeBit(this.isMatch[this.state.get()], posState, 0);
+			this.rc.encodeBit(this.probs, IS_MATCH + (this.state.get() << 4) + posState, 0);
 			this.literalEncoder.encode(this.rc);
 		} else {
 			// Some type of match
-			this.rc.encodeBit(this.isMatch[this.state.get()], posState, 1);
+			this.rc.encodeBit(this.probs, IS_MATCH + (this.state.get() << 4) + posState, 1);
 			if (this.back < REPS) {
 				// Repeated match i.e. the same distance
 				// has been used earlier.
-				this.rc.encodeBit(this.isRep, this.state.get(), 1);
+				this.rc.encodeBit(this.probs, IS_REP + this.state.get(), 1);
 				this.encodeRepMatch(this.back, len, posState);
 			} else {
 				// Normal match
-				this.rc.encodeBit(this.isRep, this.state.get(), 0);
+				this.rc.encodeBit(this.probs, IS_REP + this.state.get(), 0);
 				this.encodeMatch(this.back - REPS, len, posState);
 			}
 		}
@@ -225,7 +244,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 		this.matchLenEncoder.encode(this.rc, len, posState);
 
 		const distSlot = getDistSlot(dist);
-		this.rc.encodeBitTree(this.distSlots[getDistState(len)], distSlot);
+		this.rc.encodeBitTree(this.probs, DIST_SLOT_OFFSET + (getDistState(len) << DIST_SLOT_BITS), DIST_SLOT_BITS, distSlot);
 
 		if (distSlot >= DIST_MODEL_START) {
 			const footerBits = (distSlot >>> 1) - 1;
@@ -233,10 +252,10 @@ export abstract class LzmaEncoder extends LzmaCoder {
 			const distReduced = dist - base;
 
 			if (distSlot < DIST_MODEL_END) {
-				this.rc.encodeReverseBitTree(this.distSpecial[distSlot - DIST_MODEL_START], distReduced);
+				this.rc.encodeReverseBitTree(this.probs, distSpecialOffset(distSlot, base), footerBits, distReduced);
 			} else {
 				this.rc.encodeDirectBits(distReduced >>> ALIGN_BITS, footerBits - ALIGN_BITS);
-				this.rc.encodeReverseBitTree(this.distAlign, distReduced & ALIGN_MASK);
+				this.rc.encodeReverseBitTree(this.probs, DIST_ALIGN, ALIGN_BITS, distReduced & ALIGN_MASK);
 				--this.alignPriceCount;
 			}
 		}
@@ -251,17 +270,17 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 	private encodeRepMatch(rep: number, len: number, posState: number): void {
 		if (rep === 0) {
-			this.rc.encodeBit(this.isRep0, this.state.get(), 0);
-			this.rc.encodeBit(this.isRep0Long[this.state.get()], posState, len === 1 ? 0 : 1);
+			this.rc.encodeBit(this.probs, IS_REP0 + this.state.get(), 0);
+			this.rc.encodeBit(this.probs, IS_REP0_LONG + (this.state.get() << 4) + posState, len === 1 ? 0 : 1);
 		} else {
 			const dist = this.reps[rep];
-			this.rc.encodeBit(this.isRep0, this.state.get(), 1);
+			this.rc.encodeBit(this.probs, IS_REP0 + this.state.get(), 1);
 
 			if (rep === 1) {
-				this.rc.encodeBit(this.isRep1, this.state.get(), 0);
+				this.rc.encodeBit(this.probs, IS_REP1 + this.state.get(), 0);
 			} else {
-				this.rc.encodeBit(this.isRep1, this.state.get(), 1);
-				this.rc.encodeBit(this.isRep2, this.state.get(), rep - 2);
+				this.rc.encodeBit(this.probs, IS_REP1 + this.state.get(), 1);
+				this.rc.encodeBit(this.probs, IS_REP2 + this.state.get(), rep - 2);
 
 				if (rep === 3) {
 					this.reps[3] = this.reps[2];
@@ -293,39 +312,39 @@ export abstract class LzmaEncoder extends LzmaCoder {
 	}
 
 	getAnyMatchPrice(state: State, posState: number): number {
-		return getBitPrice(this.isMatch[state.get()][posState], 1);
+		return getBitPrice(this.probs[IS_MATCH + (state.get() << 4) + posState], 1);
 	}
 
 	getNormalMatchPrice(anyMatchPrice: number, state: State): number {
 		return anyMatchPrice
-			+ getBitPrice(this.isRep[state.get()], 0);
+			+ getBitPrice(this.probs[IS_REP + state.get()], 0);
 	}
 
 	getAnyRepPrice(anyMatchPrice: number, state: State): number {
 		return anyMatchPrice
-			+ getBitPrice(this.isRep[state.get()], 1);
+			+ getBitPrice(this.probs[IS_REP + state.get()], 1);
 	}
 
 	getShortRepPrice(anyRepPrice: number, state: State, posState: number): number {
 		return anyRepPrice
-			+ getBitPrice(this.isRep0[state.get()], 0)
-			+ getBitPrice(this.isRep0Long[state.get()][posState], 0);
+			+ getBitPrice(this.probs[IS_REP0 + state.get()], 0)
+			+ getBitPrice(this.probs[IS_REP0_LONG + (state.get() << 4) + posState], 0);
 	}
 
 	getLongRepPrice(anyRepPrice: number, rep: number, state: State, posState: number): number {
 		let price = anyRepPrice;
 
 		if (rep === 0) {
-			price += getBitPrice(this.isRep0[state.get()], 0)
-				+ getBitPrice(this.isRep0Long[state.get()][posState], 1);
+			price += getBitPrice(this.probs[IS_REP0 + state.get()], 0)
+				+ getBitPrice(this.probs[IS_REP0_LONG + (state.get() << 4) + posState], 1);
 		} else {
-			price += getBitPrice(this.isRep0[state.get()], 1);
+			price += getBitPrice(this.probs[IS_REP0 + state.get()], 1);
 
 			if (rep === 1) {
-				price += getBitPrice(this.isRep1[state.get()], 0);
+				price += getBitPrice(this.probs[IS_REP1 + state.get()], 0);
 			} else {
-				price += getBitPrice(this.isRep1[state.get()], 1)
-					+ getBitPrice(this.isRep2[state.get()], rep - 2);
+				price += getBitPrice(this.probs[IS_REP1 + state.get()], 1)
+					+ getBitPrice(this.probs[IS_REP2 + state.get()], rep - 2);
 			}
 		}
 
@@ -362,7 +381,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 		for (let distState = 0; distState < DIST_STATES; ++distState) {
 			for (let distSlot = 0; distSlot < this.distSlotPricesSize; ++distSlot) {
-				this.distSlotPrices[distState][distSlot] = getBitTreePrice(this.distSlots[distState], distSlot);
+				this.distSlotPrices[distState][distSlot] = getBitTreePrice(this.probs, DIST_SLOT_OFFSET + (distState << DIST_SLOT_BITS), DIST_SLOT_BITS, distSlot);
 			}
 
 			for (let distSlot = DIST_MODEL_END; distSlot < this.distSlotPricesSize; ++distSlot) {
@@ -380,10 +399,10 @@ export abstract class LzmaEncoder extends LzmaCoder {
 			const footerBits = (distSlot >>> 1) - 1;
 			const base = (2 | (distSlot & 1)) << footerBits;
 
-			const limit = this.distSpecial[distSlot - DIST_MODEL_START].length;
+			const limit = 1 << footerBits;
 			for (let i = 0; i < limit; ++i) {
 				const distReduced = dist - base;
-				const price = getReverseBitTreePrice(this.distSpecial[distSlot - DIST_MODEL_START], distReduced);
+				const price = getReverseBitTreePrice(this.probs, distSpecialOffset(distSlot, base), footerBits, distReduced);
 
 				for (let distState = 0; distState < DIST_STATES; ++distState) {
 					this.fullDistPrices[distState][dist] = this.distSlotPrices[distState][distSlot] + price;
@@ -398,7 +417,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 		this.alignPriceCount = ALIGN_PRICE_UPDATE_INTERVAL;
 
 		for (let i = 0; i < ALIGN_SIZE; ++i) {
-			this.alignPrices[i] = getReverseBitTreePrice(this.distAlign, i);
+			this.alignPrices[i] = getReverseBitTreePrice(this.probs, DIST_ALIGN, ALIGN_BITS, i);
 		}
 	}
 
@@ -435,7 +454,7 @@ export class LiteralEncoder extends LiteralCoder {
 
 		this.subencoders = Array.from(
 			{ length: 1 << (lc + lp) },
-			() => new LiteralSubencoder(encoder),
+			(_, i) => new LiteralSubencoder(encoder, LITERAL + 0x300 * i),
 		);
 	}
 
@@ -463,7 +482,7 @@ export class LiteralEncoder extends LiteralCoder {
 
 	getPrice(curByte: number, matchByte: number, prevByte: number, pos: number, state: State): number {
 		const encoder = this.encoder;
-		let price = getBitPrice(encoder.isMatch[state.get()][pos & encoder.posMask], 0);
+		let price = getBitPrice(encoder.probs[IS_MATCH + (state.get() << 4) + (pos & encoder.posMask)], 0);
 
 		const i = this.getSubcoderIndex(prevByte, pos);
 		price += state.isLiteral()
@@ -477,8 +496,8 @@ export class LiteralEncoder extends LiteralCoder {
 class LiteralSubencoder extends LiteralSubcoder {
 	private readonly encoder: LzmaEncoder;
 
-	constructor(encoder: LzmaEncoder) {
-		super();
+	constructor(encoder: LzmaEncoder, literalOffset: number) {
+		super(encoder.probs, literalOffset);
 		this.encoder = encoder;
 	}
 
@@ -494,7 +513,7 @@ class LiteralSubencoder extends LiteralSubcoder {
 			do {
 				subencoderIndex = symbol >>> 8;
 				bit = (symbol >>> 7) & 1;
-				rc.encodeBit(probs, subencoderIndex, bit);
+				rc.encodeBit(probs, this.literalOffset + subencoderIndex, bit);
 				symbol <<= 1;
 			} while (symbol < 0x10000);
 		} else {
@@ -509,7 +528,7 @@ class LiteralSubencoder extends LiteralSubcoder {
 				matchBit = matchByte & offset;
 				subencoderIndex = offset + matchBit + (symbol >>> 8);
 				bit = (symbol >>> 7) & 1;
-				rc.encodeBit(probs, subencoderIndex, bit);
+				rc.encodeBit(probs, this.literalOffset + subencoderIndex, bit);
 				symbol <<= 1;
 				offset &= ~(matchByte ^ symbol);
 			} while (symbol < 0x10000);
@@ -529,7 +548,7 @@ class LiteralSubencoder extends LiteralSubcoder {
 		do {
 			subencoderIndex = symbol >>> 8;
 			bit = (symbol >>> 7) & 1;
-			price += getBitPrice(probs[subencoderIndex], bit);
+			price += getBitPrice(probs[this.literalOffset + subencoderIndex], bit);
 			symbol <<= 1;
 		} while (symbol < (0x100 << 8));
 
@@ -551,7 +570,7 @@ class LiteralSubencoder extends LiteralSubcoder {
 			matchBit = matchByte & offset;
 			subencoderIndex = offset + matchBit + (symbol >>> 8);
 			bit = (symbol >>> 7) & 1;
-			price += getBitPrice(probs[subencoderIndex], bit);
+			price += getBitPrice(probs[this.literalOffset + subencoderIndex], bit);
 			symbol <<= 1;
 			offset &= ~(matchByte ^ symbol);
 		} while (symbol < (0x100 << 8));
@@ -571,8 +590,8 @@ export class LengthEncoder extends LengthCoder {
 	private readonly counters: Int32Array;
 	private readonly prices: Int32Array[];
 
-	constructor(pb: number, niceLen: number) {
-		super();
+	constructor(probs: Probs, coder: number, pb: number, niceLen: number) {
+		super(probs, coder);
 		const posStates = 1 << pb;
 		this.counters = new Int32Array(posStates);
 
@@ -595,18 +614,18 @@ export class LengthEncoder extends LengthCoder {
 		len -= MATCH_LEN_MIN;
 
 		if (len < LOW_SYMBOLS) {
-			rc.encodeBit(this.choice, 0, 0);
-			rc.encodeBitTree(this.low[posState], len);
+			rc.encodeBit(this.probs, this.coder + LEN_CHOICE, 0);
+			rc.encodeBitTree(this.probs, this.coder + LEN_LOW + posState * LOW_SYMBOLS, 3, len);
 		} else {
-			rc.encodeBit(this.choice, 0, 1);
+			rc.encodeBit(this.probs, this.coder + LEN_CHOICE, 1);
 			len -= LOW_SYMBOLS;
 
 			if (len < MID_SYMBOLS) {
-				rc.encodeBit(this.choice, 1, 0);
-				rc.encodeBitTree(this.mid[posState], len);
+				rc.encodeBit(this.probs, this.coder + LEN_CHOICE2, 0);
+				rc.encodeBitTree(this.probs, this.coder + LEN_MID + posState * MID_SYMBOLS, 3, len);
 			} else {
-				rc.encodeBit(this.choice, 1, 1);
-				rc.encodeBitTree(this.high, len - MID_SYMBOLS);
+				rc.encodeBit(this.probs, this.coder + LEN_CHOICE2, 1);
+				rc.encodeBitTree(this.probs, this.coder + LEN_HIGH, 8, len - MID_SYMBOLS);
 			}
 		}
 
@@ -627,27 +646,27 @@ export class LengthEncoder extends LengthCoder {
 	}
 
 	private updatePosStatePrices(posState: number): void {
-		let choice0Price = getBitPrice(this.choice[0], 0);
+		let choice0Price = getBitPrice(this.probs[this.coder + LEN_CHOICE], 0);
 
 		let i = 0;
 		for (; i < LOW_SYMBOLS; ++i) {
 			this.prices[posState][i] = choice0Price
-				+ getBitTreePrice(this.low[posState], i);
+				+ getBitTreePrice(this.probs, this.coder + LEN_LOW + posState * LOW_SYMBOLS, 3, i);
 		}
 
-		choice0Price = getBitPrice(this.choice[0], 1);
-		let choice1Price = getBitPrice(this.choice[1], 0);
+		choice0Price = getBitPrice(this.probs[this.coder + LEN_CHOICE], 1);
+		let choice1Price = getBitPrice(this.probs[this.coder + LEN_CHOICE2], 0);
 
 		for (; i < LOW_SYMBOLS + MID_SYMBOLS; ++i) {
 			this.prices[posState][i] = choice0Price + choice1Price
-				+ getBitTreePrice(this.mid[posState], i - LOW_SYMBOLS);
+				+ getBitTreePrice(this.probs, this.coder + LEN_MID + posState * MID_SYMBOLS, 3, i - LOW_SYMBOLS);
 		}
 
-		choice1Price = getBitPrice(this.choice[1], 1);
+		choice1Price = getBitPrice(this.probs[this.coder + LEN_CHOICE2], 1);
 
 		for (; i < this.prices[posState].length; ++i) {
 			this.prices[posState][i] = choice0Price + choice1Price
-				+ getBitTreePrice(this.high, i - LOW_SYMBOLS - MID_SYMBOLS);
+				+ getBitTreePrice(this.probs, this.coder + LEN_HIGH, 8, i - LOW_SYMBOLS - MID_SYMBOLS);
 		}
 	}
 }

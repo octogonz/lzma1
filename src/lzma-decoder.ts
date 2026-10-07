@@ -24,16 +24,34 @@
 import type { LzDecoder } from "./lz-decoder.js";
 import {
 	ALIGN_BITS,
+	DIST_ALIGN,
 	DIST_MODEL_END,
 	DIST_MODEL_START,
+	DIST_SLOT_BITS,
+	DIST_SLOT_OFFSET,
+	distSpecialOffset,
 	getDistState,
+	IS_MATCH,
+	IS_REP,
+	IS_REP0,
+	IS_REP0_LONG,
+	IS_REP1,
+	IS_REP2,
+	LEN_CHOICE,
+	LEN_CHOICE2,
+	LEN_HIGH,
+	LEN_LOW,
+	LEN_MID,
 	LengthCoder,
+	LITERAL,
 	LiteralCoder,
 	LiteralSubcoder,
 	LOW_SYMBOLS,
 	LzmaCoder,
+	MATCH_LEN,
 	MATCH_LEN_MIN,
 	MID_SYMBOLS,
+	REP_LEN,
 } from "./lzma-coder.js";
 import type { RangeDecoder } from "./range-decoder.js";
 
@@ -45,22 +63,19 @@ export class LzmaDecoder extends LzmaCoder {
 	readonly lz: LzDecoder;
 	readonly rc: RangeDecoder;
 	private readonly literalDecoder: LiteralDecoder;
-	private readonly matchLenDecoder = new LengthDecoder();
-	private readonly repLenDecoder = new LengthDecoder();
+	private readonly matchLenDecoder = new LengthDecoder(this.probs, MATCH_LEN);
+	private readonly repLenDecoder = new LengthDecoder(this.probs, REP_LEN);
 
 	/** Number of bytes decoded so far. */
 	outPos = 0;
 
 	/**
-	 * Probability array handed in for reuse. The structured probability
-	 * model of this translation cannot reuse it, so it is ignored and
-	 * none is handed back. Ignoring it only forgoes the allocation the
-	 * reuse would save; decoding is unaffected.
+	 * @param probs Probability array handed in for reuse. It is ignored:
+	 *        this decoder allocates its own. Ignoring it only forgoes the
+	 *        allocation the reuse would save; decoding is unaffected.
 	 */
-	readonly probs: Uint16Array | undefined = undefined;
-
 	constructor(lz: LzDecoder, rc: RangeDecoder, lc: number, lp: number, pb: number, probs?: Uint16Array) {
-		super(pb);
+		super(lc, lp, pb);
 		this.lz = lz;
 		this.rc = rc;
 		this.literalDecoder = new LiteralDecoder(this, lc, lp);
@@ -96,11 +111,11 @@ export class LzmaDecoder extends LzmaCoder {
 		while (this.outPos < outLimit && rc.pos <= inLimit) {
 			const posState = this.outPos & this.posMask;
 
-			if (rc.decodeBit(this.isMatch[this.state.get()], posState) === 0) {
+			if (rc.decodeBit(this.probs, IS_MATCH + (this.state.get() << 4) + posState) === 0) {
 				this.literalDecoder.decode();
 				++this.outPos;
 			} else {
-				const len = rc.decodeBit(this.isRep, this.state.get()) === 0
+				const len = rc.decodeBit(this.probs, IS_REP + this.state.get()) === 0
 					? this.decodeMatch(posState)
 					: this.decodeRepMatch(posState);
 
@@ -131,7 +146,7 @@ export class LzmaDecoder extends LzmaCoder {
 		this.reps[1] = this.reps[0];
 
 		const len = this.matchLenDecoder.decode(this.rc, posState);
-		const distSlot = this.rc.decodeBitTree(this.distSlots[getDistState(len)]);
+		const distSlot = this.rc.decodeBitTree(this.probs, DIST_SLOT_OFFSET + (getDistState(len) << DIST_SLOT_BITS), DIST_SLOT_BITS);
 
 		if (distSlot < DIST_MODEL_START) {
 			this.reps[0] = distSlot;
@@ -140,10 +155,10 @@ export class LzmaDecoder extends LzmaCoder {
 			this.reps[0] = (2 | (distSlot & 1)) << limit;
 
 			if (distSlot < DIST_MODEL_END) {
-				this.reps[0] |= this.rc.decodeReverseBitTree(this.distSpecial[distSlot - DIST_MODEL_START]);
+				this.reps[0] |= this.rc.decodeReverseBitTree(this.probs, distSpecialOffset(distSlot, this.reps[0]), limit);
 			} else {
 				this.reps[0] |= this.rc.decodeDirectBits(limit - ALIGN_BITS) << ALIGN_BITS;
-				this.reps[0] |= this.rc.decodeReverseBitTree(this.distAlign);
+				this.reps[0] |= this.rc.decodeReverseBitTree(this.probs, DIST_ALIGN, ALIGN_BITS);
 			}
 		}
 
@@ -151,18 +166,18 @@ export class LzmaDecoder extends LzmaCoder {
 	}
 
 	private decodeRepMatch(posState: number): number {
-		if (this.rc.decodeBit(this.isRep0, this.state.get()) === 0) {
-			if (this.rc.decodeBit(this.isRep0Long[this.state.get()], posState) === 0) {
+		if (this.rc.decodeBit(this.probs, IS_REP0 + this.state.get()) === 0) {
+			if (this.rc.decodeBit(this.probs, IS_REP0_LONG + (this.state.get() << 4) + posState) === 0) {
 				this.state.updateShortRep();
 				return 1;
 			}
 		} else {
 			let tmp: number;
 
-			if (this.rc.decodeBit(this.isRep1, this.state.get()) === 0) {
+			if (this.rc.decodeBit(this.probs, IS_REP1 + this.state.get()) === 0) {
 				tmp = this.reps[1];
 			} else {
-				if (this.rc.decodeBit(this.isRep2, this.state.get()) === 0) {
+				if (this.rc.decodeBit(this.probs, IS_REP2 + this.state.get()) === 0) {
 					tmp = this.reps[2];
 				} else {
 					tmp = this.reps[3];
@@ -192,7 +207,7 @@ class LiteralDecoder extends LiteralCoder {
 
 		this.subdecoders = Array.from(
 			{ length: 1 << (lc + lp) },
-			() => new LiteralSubdecoder(decoder),
+			(_, i) => new LiteralSubdecoder(decoder, LITERAL + 0x300 * i),
 		);
 	}
 
@@ -214,8 +229,8 @@ class LiteralDecoder extends LiteralCoder {
 class LiteralSubdecoder extends LiteralSubcoder {
 	private readonly decoder: LzmaDecoder;
 
-	constructor(decoder: LzmaDecoder) {
-		super();
+	constructor(decoder: LzmaDecoder, literalOffset: number) {
+		super(decoder.probs, literalOffset);
 		this.decoder = decoder;
 	}
 
@@ -227,7 +242,7 @@ class LiteralSubdecoder extends LiteralSubcoder {
 
 		if (decoder.state.isLiteral()) {
 			do {
-				symbol = (symbol << 1) | rc.decodeBit(probs, symbol);
+				symbol = (symbol << 1) | rc.decodeBit(probs, this.literalOffset + symbol);
 			} while (symbol < 0x100);
 		} else {
 			let matchByte = decoder.lz.getByte(decoder.reps[0]);
@@ -238,7 +253,7 @@ class LiteralSubdecoder extends LiteralSubcoder {
 			do {
 				matchByte <<= 1;
 				matchBit = matchByte & offset;
-				bit = rc.decodeBit(probs, offset + matchBit + symbol);
+				bit = rc.decodeBit(probs, this.literalOffset + offset + matchBit + symbol);
 				symbol = (symbol << 1) | bit;
 				offset &= (0 - bit) ^ ~matchBit;
 			} while (symbol < 0x100);
@@ -251,14 +266,14 @@ class LiteralSubdecoder extends LiteralSubcoder {
 
 class LengthDecoder extends LengthCoder {
 	decode(rc: RangeDecoder, posState: number): number {
-		if (rc.decodeBit(this.choice, 0) === 0) {
-			return rc.decodeBitTree(this.low[posState]) + MATCH_LEN_MIN;
+		if (rc.decodeBit(this.probs, this.coder + LEN_CHOICE) === 0) {
+			return rc.decodeBitTree(this.probs, this.coder + LEN_LOW + posState * LOW_SYMBOLS, 3) + MATCH_LEN_MIN;
 		}
 
-		if (rc.decodeBit(this.choice, 1) === 0) {
-			return rc.decodeBitTree(this.mid[posState]) + MATCH_LEN_MIN + LOW_SYMBOLS;
+		if (rc.decodeBit(this.probs, this.coder + LEN_CHOICE2) === 0) {
+			return rc.decodeBitTree(this.probs, this.coder + LEN_MID + posState * MID_SYMBOLS, 3) + MATCH_LEN_MIN + LOW_SYMBOLS;
 		}
 
-		return rc.decodeBitTree(this.high) + MATCH_LEN_MIN + LOW_SYMBOLS + MID_SYMBOLS;
+		return rc.decodeBitTree(this.probs, this.coder + LEN_HIGH, 8) + MATCH_LEN_MIN + LOW_SYMBOLS + MID_SYMBOLS;
 	}
 }

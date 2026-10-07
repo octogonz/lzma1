@@ -287,3 +287,125 @@ two of them. `fixtures/generate.ts` stops on any other difference.
     only for slots 4 to 13, `state` stays in 0..11 through `State`'s
     transitions, and `posState` and the literal subcoder index are masked. These
     are the Java code's values on the same input, as above.
+
+## Behavior-preserving transformations
+
+Each entry below changes how the translated code stores data or where it does
+work, and argues that behavior is unchanged for every input. Each applies to the
+code as the entries before it leave it. An entry that only prepares the next one
+says so.
+
+### Probabilities in one flat array
+
+Change, in `lzma-coder.ts`, `range-encoder.ts`, `range-decoder.ts`,
+`lzma-encoder.ts` and `lzma-decoder.ts`: all probabilities of a coder live in
+one `Uint16Array`, in the layout the LZMA SDK and liblzma use.
+
+1. `lzma-coder.ts` defines the layout: `IS_MATCH` 0, `IS_REP` 192, `IS_REP0`
+   204, `IS_REP1` 216, `IS_REP2` 228, `IS_REP0_LONG` 240, `DIST_SLOT_OFFSET`
+   432, `DIST_SPECIAL` 688, `DIST_ALIGN` 802, `MATCH_LEN` 818, `REP_LEN` 1332,
+   `LITERAL` 1846; within a length coder `LEN_CHOICE` 0, `LEN_CHOICE2` 1,
+   `LEN_LOW` 2, `LEN_MID` 130, `LEN_HIGH` 258, `LEN_SIZE` 514; and
+   `distSpecialOffset(distSlot, base) = DIST_SPECIAL + base - distSlot - 1`.
+   `LzmaCoder(lc, lp, pb)` allocates `probs` with `probsSize(lc, lp)` entries;
+   `probsSize` reads `LITERAL + (0x300 << (lc + lp))`, the same value as before.
+   `LiteralSubcoder(probs, literalOffset)` and `LengthCoder(probs, coder)` hold
+   the outer coder's array and their offset in it; literal subcoder `i` is at
+   `LITERAL + 0x300 * i`. Each `reset()` fills the regions of the arrays it used
+   to fill, at the same call sites.
+2. The range coder's tree methods and tree price functions take
+   `(probs, offset, bits, ...)`, where the tree size used to come from
+   `probs.length`; the literal loops in `LiteralSubencoder.encode` and
+   `LiteralSubdecoder.decode` index the array at the subcoder's `literalOffset`
+   plus their former index.
+3. Every access in the encoder and decoder names the array slot:
+   `isMatch[state][posState]` becomes
+   `probs[IS_MATCH + (state << 4) + posState]`, `isRep*[state]` becomes
+   `probs[IS_REP* + state]`, a tree becomes its offset and bit count
+   (`DIST_SLOT_OFFSET + (distState << DIST_SLOT_BITS)` with 6 bits,
+   `distSpecialOffset(distSlot, base)` with the footer bits, `DIST_ALIGN` with
+   `ALIGN_BITS`, `coder + LEN_LOW + posState * LOW_SYMBOLS` and
+   `coder + LEN_MID + posState * MID_SYMBOLS` with 3 bits, `coder + LEN_HIGH`
+   with 8 bits), and the literal loops add `literalOffset`. Classes, loops and
+   loop forms are unchanged.
+4. Names: `DIST_SLOT_OFFSET` is the slot trees' region and `DIST_SLOT_BITS`
+   their bit count; the Java code's `DIST_SLOTS` (the number of slots) keeps its
+   name and expression. The literal loops keep the Java code's local `offset`,
+   so a subcoder's base is `literalOffset`.
+5. `LzmaDecoder` no longer declares its own `probs` field, which read
+   `undefined`; the reuse parameter's explanation moves to the constructor.
+
+Argument:
+
+- _The mapping is one-to-one on used elements._ `isMatch[s][p]` maps to
+  `16s + p`, `isRep[s]`, `isRep0[s]`, `isRep1[s]`, `isRep2[s]` to their base
+  plus `s`, `isRep0Long[s][p]` to `240 + 16s + p`, `distSlots[d][j]` to
+  `432 + 64d + j`, `distAlign[j]` to `802 + j`; a length coder at `c` maps
+  `choice[0]`, `choice[1]` to `c`, `c + 1`, `low[p][j]` to `c + 2 + 8p + j`,
+  `mid[p][j]` to `c + 130 + 8p + j`, `high[j]` to `c + 258 + j`, with `c` 818 or
+  1332; literal subcoder `i` maps its `probs[j]` to `1846 + 0x300 i + j`. With
+  `s < 12`, `p < 16`, `d < 4` and the former array lengths as bounds on `j`,
+  each family fills exactly the half-open interval up to the next base, so the
+  families are disjoint and together cover `[0, probsSize)`. The `distSpecial`
+  tree of slot `s` (footer bits `f = (s >>> 1) - 1`, base
+  `b = (2 | (s & 1)) << f`) maps its index `j` to `687 + b - s + j`. Its used
+  indices `1 .. 2^f - 1` land on `[688 + b - s, 686 + b - s + 2^f]`, and the
+  next slot's base is `b + 2^f`, so consecutive trees abut and the used entries
+  of all ten trees are exactly `[688, 801]`, 114 distinct slots. Each tree's
+  index 0 lands on the previous tree's last used slot (for slot 4, on the last
+  slot-tree entry, 687), but index 0 of a tree is never read or written: every
+  tree walk and tree price starts at index 1 and only moves to larger indices.
+- _Every access reaches the mapped slot, in the same order._ Single-bit models:
+  each `encodeBit`, `decodeBit` and `getBitPrice` on `a[x]` or `a[s][p]` becomes
+  the same call on the mapped slot, with the same state and position values.
+  Trees: the old methods walked a tree-local index from 1 and read and wrote
+  `probs[index]`; the new ones walk the same tree-local index and read and write
+  `probs[offset + index]`. The bound that came from `probs.length` comes from
+  `1 << bits`, and at every call site `bits` is the logarithm of the former
+  array's length: slot trees 64 and 6, align tree 16 and `ALIGN_BITS` 4, `low`
+  and `mid` 8 and 3, `high` 256 and 8, the special tree of slot `s` `2^f` and
+  `f`. So `mask`, the marker bit `symbol |= 1 << bits`, the decoder's loop test
+  and its final subtraction take the same values. In `updateDistPrices`, the
+  loop bound `limit`, formerly the special tree's length, is `1 << footerBits`,
+  the same number. The encoder passes the special tree's `base` as computed
+  above; the decoder passes `reps[0]`, which holds exactly
+  `(2 | (distSlot & 1)) << limit`, the base, when the call's arguments are
+  evaluated (the `|=` reads `reps[0]` before evaluating its right side and
+  writes only after the tree is decoded). Literals: the old loops indexed the
+  subcoder's array with `symbol >>> 8`, or `offset + matchBit + (symbol >>> 8)`
+  for matched literals (`offset + matchBit + symbol` in the decoder); the new
+  ones add the subcoder's `literalOffset`, whose subcoder index comes from the
+  same `getSubcoderIndex`. Same values, same order, same number of iterations.
+- _Bounds._ An out-of-range typed-array index would silently read `undefined` or
+  drop a write instead of throwing (hazard checklist). Every mapped index lies
+  inside its family's interval, because the structured index it replaces was
+  inside the former array: those indices are the Java code's on the same input
+  (`state` below 12 through `State`, masked `posState`, `distState` below 4,
+  tree walks below the tree size, a decoded slot below 64 selecting a special
+  tree only for slots 4 to 13), and the literal subcoder index from
+  `getSubcoderIndex` is below `2^(lc + lp)`, the number of subcoders, so the
+  largest literal index is below `probsSize(lc, lp)`, the array's length.
+- _No new sharing._ Distinct used elements have distinct slots, so no write
+  reaches a slot that another used element reads; the only shared slots are the
+  special trees' never-accessed index 0 entries.
+- _Reset._ The old resets set every element of every array to `PROB_INIT`; the
+  new ones fill the regions `[0, 818)` (in the nine former model families'
+  intervals), each length coder's `[c, c + 514)` (in the former `choice`, `low`,
+  `mid` and `high` intervals) and each literal subcoder's `0x300` entries, at
+  the same call sites and in the same order. Their union is the whole array, so
+  every used element is `PROB_INIT` after a reset exactly when it was before.
+  Before the first reset the array is zero-filled, as the former arrays were,
+  and both encoder and decoder constructors reset before any use.
+- _Construction._ With `target` ES2022, class fields are defined after `super()`
+  returns. `LzmaCoder`'s constructor assigns `probs` before any subclass field
+  initializer runs, so `LzmaDecoder`'s length decoder initializers and the
+  encoder's and decoder's constructor bodies receive the array. No subclass
+  declares `probs`, `literalOffset` or `coder`, which would redefine them as
+  `undefined`; the decoder's former `probs` declaration is removed for exactly
+  that reason.
+- _API code._ A finished decoder's `probs` is now the array instead of
+  `undefined`, so the API code keeps it as a spare and passes it to the next
+  decoder of the same size, whose constructor still ignores the parameter and
+  allocates its own array. No decoder reads or writes a spare, so decoding is
+  unchanged; the only effect is that one finished array per size stays
+  referenced.

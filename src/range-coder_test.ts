@@ -78,8 +78,8 @@ describe("range coder", () => {
 			const tree = probs(64);
 			const reverse = probs(16);
 			for (let i = 0; i < symbols.length; i++) {
-				rc.encodeBitTree(tree, symbols[i] & 63);
-				rc.encodeReverseBitTree(reverse, symbols[i] & 15);
+				rc.encodeBitTree(tree, 0, 6, symbols[i] & 63);
+				rc.encodeReverseBitTree(reverse, 0, 4, symbols[i] & 15);
 				rc.encodeDirectBits(directs[i], 26);
 			}
 		});
@@ -88,8 +88,8 @@ describe("range coder", () => {
 		const tree = probs(64);
 		const reverse = probs(16);
 		for (let i = 0; i < symbols.length; i++) {
-			expect(rc.decodeBitTree(tree)).toBe(symbols[i] & 63);
-			expect(rc.decodeReverseBitTree(reverse)).toBe(symbols[i] & 15);
+			expect(rc.decodeBitTree(tree, 0, 6)).toBe(symbols[i] & 63);
+			expect(rc.decodeReverseBitTree(reverse, 0, 4)).toBe(symbols[i] & 15);
 			expect(rc.decodeDirectBits(26)).toBe(directs[i]);
 		}
 		expect(rc.isFinished()).toBe(true);
@@ -100,7 +100,7 @@ describe("range coder", () => {
 		const p = probs(0x100);
 
 		expect(() => {
-			for (let i = 0; i < 100; i++) rc.decodeBitTree(p);
+			for (let i = 0; i < 100; i++) rc.decodeBitTree(p, 0, 8);
 		}).toThrow("Truncated input");
 	});
 
@@ -149,7 +149,7 @@ describe("prices", () => {
 		const bitPrices = [1, 0, 1].map((bit) => getBitPrice(PROB_INIT, bit));
 		const sum = bitPrices.reduce((a, b) => a + b);
 
-		expect(getBitTreePrice(p, 0b101)).toBe(sum);
-		expect(getReverseBitTreePrice(p, 0b101)).toBe(sum);
+		expect(getBitTreePrice(p, 0, 3, 0b101)).toBe(sum);
+		expect(getReverseBitTreePrice(p, 0, 3, 0b101)).toBe(sum);
 	});
 });

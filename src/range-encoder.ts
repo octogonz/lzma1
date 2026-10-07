@@ -61,28 +61,28 @@ export function getBitPrice(prob: number, bit: number): number {
 	return prices[(prob ^ (-bit & (BIT_MODEL_TOTAL - 1))) >>> MOVE_REDUCING_BITS];
 }
 
-export function getBitTreePrice(probs: Probs, symbol: number): number {
+export function getBitTreePrice(probs: Probs, offset: number, bits: number, symbol: number): number {
 	let price = 0;
-	symbol |= probs.length;
+	symbol |= 1 << bits;
 
 	do {
 		const bit = symbol & 1;
 		symbol >>>= 1;
-		price += getBitPrice(probs[symbol], bit);
+		price += getBitPrice(probs[offset + symbol], bit);
 	} while (symbol !== 1);
 
 	return price;
 }
 
-export function getReverseBitTreePrice(probs: Probs, symbol: number): number {
+export function getReverseBitTreePrice(probs: Probs, offset: number, bits: number, symbol: number): number {
 	let price = 0;
 	let index = 1;
-	symbol |= probs.length;
+	symbol |= 1 << bits;
 
 	do {
 		const bit = symbol & 1;
 		symbol >>>= 1;
-		price += getBitPrice(probs[index], bit);
+		price += getBitPrice(probs[offset + index], bit);
 		index = (index << 1) | bit;
 	} while (symbol !== 1);
 
@@ -190,14 +190,14 @@ export class RangeEncoder {
 		}
 	}
 
-	encodeBitTree(probs: Probs, symbol: number): void {
+	encodeBitTree(probs: Probs, offset: number, bits: number, symbol: number): void {
 		let index = 1;
-		let mask = probs.length;
+		let mask = 1 << bits;
 
 		do {
 			mask >>>= 1;
 			const bit = symbol & mask;
-			this.encodeBit(probs, index, bit);
+			this.encodeBit(probs, offset + index, bit);
 
 			index <<= 1;
 			if (bit !== 0) {
@@ -206,14 +206,14 @@ export class RangeEncoder {
 		} while (mask !== 1);
 	}
 
-	encodeReverseBitTree(probs: Probs, symbol: number): void {
+	encodeReverseBitTree(probs: Probs, offset: number, bits: number, symbol: number): void {
 		let index = 1;
-		symbol |= probs.length;
+		symbol |= 1 << bits;
 
 		do {
 			const bit = symbol & 1;
 			symbol >>>= 1;
-			this.encodeBit(probs, index, bit);
+			this.encodeBit(probs, offset + index, bit);
 			index = (index << 1) | bit;
 		} while (symbol !== 1);
 	}
