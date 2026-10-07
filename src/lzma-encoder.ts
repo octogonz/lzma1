@@ -160,7 +160,6 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 	override reset(): void {
 		super.reset();
-		this.literalEncoder.reset();
 		this.matchLenEncoder.reset();
 		this.repLenEncoder.reset();
 		this.distPriceCount = 0;
@@ -458,12 +457,6 @@ export class LiteralEncoder extends LiteralCoder {
 		);
 	}
 
-	reset(): void {
-		for (let i = 0; i < this.subencoders.length; ++i) {
-			this.subencoders[i].reset();
-		}
-	}
-
 	encodeInit(rc: RangeEncoder): void {
 		// When encoding the first byte of the stream, there is
 		// no previous byte in the dictionary so the encode function
@@ -602,9 +595,7 @@ export class LengthEncoder extends LengthCoder {
 		this.prices = newPriceArray(posStates, lenSymbols);
 	}
 
-	override reset(): void {
-		super.reset();
-
+	reset(): void {
 		// Reset counters to zero to force price update before
 		// the prices are needed.
 		this.counters.fill(0);

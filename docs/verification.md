@@ -409,3 +409,46 @@ Argument:
   allocates its own array. No decoder reads or writes a spare, so decoding is
   unchanged; the only effect is that one finished array per size stays
   referenced.
+
+### Probabilities reset all at once
+
+Change, in `lzma-coder.ts`, `lzma-encoder.ts` and `lzma-decoder.ts`:
+`LzmaCoder.reset` resets the whole probability array with one
+`initProbs(this.probs)` instead of one call per former array region; it still
+zeroes the four `reps` and resets `state` as the Java code does. The per-region
+resets this makes redundant are deleted: `LiteralSubcoder.reset`,
+`LengthCoder.reset`, `LiteralEncoder.reset`, `LiteralDecoder.reset`, and the
+`LzmaDecoder.reset` override, which would only call `super.reset()`.
+`LzmaEncoder.reset` no longer calls the literal encoder's reset, and
+`LengthEncoder.reset` no longer calls `super.reset()`; it still zeroes its
+counters.
+
+Argument:
+
+- _Same values._ `initProbs` is `fill(PROB_INIT)`, and every deleted reset was a
+  sequence of `initProbs` calls, so every reset, old and new, writes the single
+  value `PROB_INIT`.
+- _Same elements, all of them._ The old resets covered `[0, MATCH_LEN)`
+  (`LzmaCoder.reset`, nine contiguous regions), each length coder's
+  `[c, c + LEN_SIZE)` for `c` = `MATCH_LEN` and `REP_LEN` (choice, all sixteen
+  low and mid trees regardless of `pb`, and the high tree, contiguous), and each
+  literal subcoder's `0x300` entries, for all `2^(lc + lp)` subcoders. As the
+  flat-array entry shows, these intervals tile `[0, probsSize(lc, lp))`, the
+  whole array. So after a reset every element, used or not, is `PROB_INIT` in
+  both versions: the arrays are identical, not only equal on the used elements.
+- _Order does not matter._ Within a reset, the old code interleaved the
+  probability writes with writes to `reps`, `state`, the length encoders'
+  counters, the encoder's price counters and `readAhead`. These are distinct
+  storage locations, and no reset step reads any of them or any probability, so
+  doing all probability writes as one fill in `LzmaCoder.reset` yields the same
+  final state.
+- _Same call sites._ Resets happen where they did: at the end of the
+  `LzmaEncoder` and `LzmaDecoder` constructors, after every field the old resets
+  used exists, and in `LzmaEncoder.restart`; `LzmaEncoderNormal.reset` still
+  calls `super.reset()`. The decoder's constructor now reaches `LzmaCoder.reset`
+  directly, which is all the deleted override did besides the deleted region
+  resets. The counters are still zeroed by `LengthEncoder.reset`, which
+  `LzmaEncoder.reset` still calls for both length encoders.
+- _No other callers._ The deleted methods were called only from the resets
+  above; the type checker, run over the library and every test, confirms no
+  remaining reference.

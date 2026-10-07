@@ -185,16 +185,7 @@ export abstract class LzmaCoder {
 		this.reps[3] = 0;
 		this.state.reset();
 
-		const probs = this.probs;
-		initProbs(probs.subarray(IS_MATCH, IS_REP));
-		initProbs(probs.subarray(IS_REP, IS_REP0));
-		initProbs(probs.subarray(IS_REP0, IS_REP1));
-		initProbs(probs.subarray(IS_REP1, IS_REP2));
-		initProbs(probs.subarray(IS_REP2, IS_REP0_LONG));
-		initProbs(probs.subarray(IS_REP0_LONG, DIST_SLOT_OFFSET));
-		initProbs(probs.subarray(DIST_SLOT_OFFSET, DIST_SPECIAL));
-		initProbs(probs.subarray(DIST_SPECIAL, DIST_ALIGN));
-		initProbs(probs.subarray(DIST_ALIGN, MATCH_LEN));
+		initProbs(this.probs);
 	}
 }
 
@@ -223,10 +214,6 @@ export abstract class LiteralSubcoder {
 		this.probs = probs;
 		this.literalOffset = literalOffset;
 	}
-
-	reset(): void {
-		initProbs(this.probs.subarray(this.literalOffset, this.literalOffset + 0x300));
-	}
 }
 
 export abstract class LengthCoder {
@@ -237,13 +224,5 @@ export abstract class LengthCoder {
 	constructor(probs: Probs, coder: number) {
 		this.probs = probs;
 		this.coder = coder;
-	}
-
-	reset(): void {
-		const coder = this.coder;
-		initProbs(this.probs.subarray(coder + LEN_CHOICE, coder + LEN_LOW));
-		initProbs(this.probs.subarray(coder + LEN_LOW, coder + LEN_MID));
-		initProbs(this.probs.subarray(coder + LEN_MID, coder + LEN_HIGH));
-		initProbs(this.probs.subarray(coder + LEN_HIGH, coder + LEN_SIZE));
 	}
 }

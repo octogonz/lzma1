@@ -82,13 +82,6 @@ export class LzmaDecoder extends LzmaCoder {
 		this.reset();
 	}
 
-	override reset(): void {
-		super.reset();
-		this.literalDecoder.reset();
-		this.matchLenDecoder.reset();
-		this.repLenDecoder.reset();
-	}
-
 	/**
 	 * Returns true if LZMA end marker was detected. It is encoded as
 	 * the maximum match distance which with int32 values becomes -1.
@@ -209,12 +202,6 @@ class LiteralDecoder extends LiteralCoder {
 			{ length: 1 << (lc + lp) },
 			(_, i) => new LiteralSubdecoder(decoder, LITERAL + 0x300 * i),
 		);
-	}
-
-	reset(): void {
-		for (let i = 0; i < this.subdecoders.length; ++i) {
-			this.subdecoders[i].reset();
-		}
 	}
 
 	decode(): void {
