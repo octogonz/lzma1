@@ -70,12 +70,11 @@ export class LzmaDecoder extends LzmaCoder {
 	outPos = 0;
 
 	/**
-	 * @param probs Probability array handed in for reuse. It is ignored:
-	 *        this decoder allocates its own. Ignoring it only forgoes the
-	 *        allocation the reuse would save; decoding is unaffected.
+	 * @param probs Probability array of an earlier decoder to reuse, of
+	 *        `probsSize(lc, lp)` entries; a new one is allocated without it.
 	 */
 	constructor(lz: LzDecoder, rc: RangeDecoder, lc: number, lp: number, pb: number, probs?: Uint16Array) {
-		super(lc, lp, pb);
+		super(lc, lp, pb, probs);
 		this.lz = lz;
 		this.rc = rc;
 		this.literalDecoder = new LiteralDecoder(this, lc, lp);

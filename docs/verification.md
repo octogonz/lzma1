@@ -452,3 +452,36 @@ Argument:
 - _No other callers._ The deleted methods were called only from the resets
   above; the type checker, run over the library and every test, confirms no
   remaining reference.
+
+### Probability arrays reused between one-shot decoders
+
+Change, in `lzma-coder.ts` and `lzma-decoder.ts`: the `LzmaCoder` constructor
+takes an optional probability array to use instead of allocating one
+(`this.probs = probs ?? new Uint16Array(probsSize(lc, lp))`), and `LzmaDecoder`
+passes on the array its constructor already receives from the API code's pool in
+`alone-decoder.ts`. The encoder passes no array and is unchanged.
+
+Argument:
+
+- _One owner at a time._ The pool (`spareProbs`, keyed by array length) receives
+  an array only in `release()`, which runs at the end of `decode()` in the step
+  that sets `done`; a done `AloneDecoder` returns at the top of `write()` and
+  `end()`, so its `LzmaDecoder` never reads or writes that array again.
+  `start()`, which runs once per `AloneDecoder`, removes the entry from the pool
+  before passing it to exactly one new decoder. So each array belongs to at most
+  one decoder that can still use it, and no two decoders share probabilities. A
+  decoder that throws never returns its array, and a stream with declared size 0
+  finishes without decoding and without returning it; both only lose an array.
+  Only decoders created with `reuse` (the synchronous one-shot path in
+  `lzma.ts`) take from or give to the pool.
+- _Right size._ The lookup key is `probsSize(lc, lp)` for the new header, and
+  entries are stored under their own length, so a reused array has exactly the
+  length a new allocation would have. Headers with different `(lc, lp)` but the
+  same `lc + lp` share a key; their arrays have the same length and the same
+  layout.
+- _Previous contents never read._ Until its `reset()`, the `LzmaDecoder`
+  constructor only stores references to the array (in `LzmaCoder`, its length
+  decoders and its literal subdecoders). `reset()` fills the whole array with
+  `PROB_INIT` (previous entry), so before the first probability is read, every
+  element of a reused array equals the same element of a fresh array after its
+  reset. From there on, decoding depends on the input alone, as before.

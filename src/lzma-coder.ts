@@ -173,9 +173,13 @@ export abstract class LzmaCoder {
 
 	readonly probs: Probs;
 
-	constructor(lc: number, lp: number, pb: number) {
+	/**
+	 * @param probs Probability array to reuse, of `probsSize(lc, lp)` entries.
+	 *        Its contents are overwritten by `reset()`.
+	 */
+	constructor(lc: number, lp: number, pb: number, probs?: Probs) {
 		this.posMask = (1 << pb) - 1;
-		this.probs = new Uint16Array(probsSize(lc, lp));
+		this.probs = probs ?? new Uint16Array(probsSize(lc, lp));
 	}
 
 	reset(): void {
