@@ -518,3 +518,80 @@ Argument:
   perform the same reads and writes in the same order, and the methods do the
   same work before and after the call (the counter assignments come first, as
   before). No moved statement uses `this` for anything else.
+
+### Initial price tables shared between encoders
+
+Change, in `lzma-encoder.ts`: the encoder records whether it has coded a
+distance since its last reset (`distModelsUsed`, set right after the distance
+slot tree is coded in `encodeMatch`) and whether it has coded align bits
+(`alignModelUsed`, set right after the align tree); each length encoder records
+whether it has coded a length (`used`, set at the end of `encode`). The resets
+clear the flags. When a price update finds its flag clear, it copies from tables
+built once per module by `getInitialPrices()` instead of calling the compute
+function: the compute functions of the previous entry run on a
+`Uint16Array(LITERAL)` filled with `PROB_INIT`, for all 64 distance slots and
+all 272 lengths (coder `MATCH_LEN`, position state 0), into tables of the Java
+code's row shapes. The copy takes the first `distSlotPricesSize` slot prices of
+each distance state, all full-distance and align prices, and the first
+`prices[posState].length` length prices. The update counters, and so the update
+points, are unchanged.
+
+Argument:
+
+- _Invariant: a clear flag means untouched probabilities._ After a reset, every
+  probability is `PROB_INIT` (single-fill entry) and every flag is clear. The
+  probabilities `computeDistPrices` reads (the slot trees and the special trees,
+  `DIST_SLOT_OFFSET` up to `DIST_ALIGN`) are written only in `encodeMatch`: by
+  the slot tree coding, which `distModelsUsed = true` follows directly, and by
+  the special tree coding later in the same call. Those `computeAlignPrices`
+  reads (`DIST_ALIGN` up to `MATCH_LEN`) are written only by the align tree
+  coding in `encodeMatch`, which `alignModelUsed = true` follows directly. Those
+  `computeLengthPrices` reads for a length encoder lie in its own 514-entry
+  block, written only by its `encode`, which sets `used` at its end. No other
+  code writes these regions: every probability write is in a range encoder
+  method, and the other call sites address the single-bit models below
+  `DIST_SLOT_OFFSET` and the literal region from `LITERAL` on, disjoint by the
+  flat-array mapping. Price updates run only from `updatePrices()`, whose one
+  caller, `LzmaEncoderNormal.getNextSymbol`, runs between symbols, never inside
+  these methods; the fast encoder computes no prices. So whenever an update
+  finds a flag clear, every probability its compute function would read is
+  `PROB_INIT`. A throw between a write and its flag can come only from the range
+  encoder's buffer growth (allocation failure); the encoder is then never used
+  again (the one-shot path drops it, and a `TransformStream` whose `transform`
+  threw is errored and calls nothing further), and the API code returns an
+  encoder to its pool only after a successful `finish()`.
+- _Flags, not counters._ The update counters cannot tell untouched models from
+  touched ones: `LzmaEncoderNormal.getNextSymbol` returns a repeated or normal
+  match of at least `niceLen` before its first `updatePrices()`, so such a match
+  writes length and distance probabilities, and decrements the counters, before
+  any price update. The first update after it must compute from those
+  probabilities; the flags, set by the writes themselves, record exactly that.
+- _The shared tables hold the values the encoder would compute._ The compute
+  functions are deterministic in the probabilities they read and their
+  parameters, and in the shared computation every read probability is also
+  `PROB_INIT` (the array covers every index below `LITERAL`, which includes all
+  three regions).
+  - Distances: slot price `(d, s)` depends only on `d`, `s` and the slot tree's
+    probabilities, so for `s < distSlotPricesSize` the shared entry equals the
+    encoder's own result. The full-distance prices read slot prices 0 to 13 and
+    the special trees only; the encoder computes those slot prices too, because
+    `dictSize >= 4096` gives `distSlotPricesSize >= 24`. Each encoder row has
+    `distSlotPricesSize <= 64` entries, so the `subarray` copy fills it exactly,
+    and the full-distance rows have the same 128 entries in both.
+  - Align: the 16 prices depend only on the align probabilities.
+  - Lengths: the price at index `i` reads the coder's two choice bits and its
+    low, mid or high tree for the position state. With all of them `PROB_INIT`,
+    the result depends only on `i`, not on the coder's offset or the position
+    state. The shared row has 272 entries and an encoder row has
+    `lenSymbols = max(niceLen - 1, 16) <= 272` (`niceLen <= 273`), so the copy
+    fills it exactly with entries computed by the same three loops.
+- _No sharing of mutable state._ The shared tables are reachable only through
+  `getInitialPrices()`, whose callers only read them (`set` copies values into
+  the encoder's own rows; `subarray` makes a read-only use of a view). No
+  encoder writes them, so every encoder sees the same values.
+- _Same timing._ The counters are unchanged, so updates happen at the same
+  points, and every price table holds the same values at every read as before.
+- _New state._ The three flags are new fields initialized to `false`; their
+  initializers read nothing, and the constructors' resets set them again before
+  any use. `initialPrices` is a module variable read and written only by
+  `getInitialPrices()`, which runs after the module has been evaluated.

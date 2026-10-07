@@ -26,6 +26,7 @@ import {
 	DIST_MODEL_START,
 	DIST_SLOT_BITS,
 	DIST_SLOT_OFFSET,
+	DIST_SLOTS,
 	DIST_STATES,
 	distSpecialOffset,
 	FULL_DISTANCES,
@@ -48,13 +49,17 @@ import {
 	LOW_SYMBOLS,
 	LzmaCoder,
 	MATCH_LEN,
+	MATCH_LEN_MAX,
 	MATCH_LEN_MIN,
 	MID_SYMBOLS,
 	REP_LEN,
 	REPS,
 	State,
 } from "./lzma-coder.js";
-import type { Probs } from "./range-coder.js";
+import {
+	initProbs,
+	type Probs,
+} from "./range-coder.js";
 import {
 	getBitPrice,
 	getBitTreePrice,
@@ -99,6 +104,10 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 	private distPriceCount = 0;
 	private alignPriceCount = 0;
+	/** Whether a distance was encoded since the last reset. */
+	private distModelsUsed = false;
+	/** Whether align bits were encoded since the last reset. */
+	private alignModelUsed = false;
 
 	private readonly distSlotPricesSize: number;
 	private readonly distSlotPrices: Int32Array[];
@@ -164,6 +173,8 @@ export abstract class LzmaEncoder extends LzmaCoder {
 		this.repLenEncoder.reset();
 		this.distPriceCount = 0;
 		this.alignPriceCount = 0;
+		this.distModelsUsed = false;
+		this.alignModelUsed = false;
 
 		this.readAhead = -1;
 	}
@@ -244,6 +255,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 
 		const distSlot = getDistSlot(dist);
 		this.rc.encodeBitTree(this.probs, DIST_SLOT_OFFSET + (getDistState(len) << DIST_SLOT_BITS), DIST_SLOT_BITS, distSlot);
+		this.distModelsUsed = true;
 
 		if (distSlot >= DIST_MODEL_START) {
 			const footerBits = (distSlot >>> 1) - 1;
@@ -255,6 +267,7 @@ export abstract class LzmaEncoder extends LzmaCoder {
 			} else {
 				this.rc.encodeDirectBits(distReduced >>> ALIGN_BITS, footerBits - ALIGN_BITS);
 				this.rc.encodeReverseBitTree(this.probs, DIST_ALIGN, ALIGN_BITS, distReduced & ALIGN_MASK);
+				this.alignModelUsed = true;
 				--this.alignPriceCount;
 			}
 		}
@@ -378,13 +391,26 @@ export abstract class LzmaEncoder extends LzmaCoder {
 	private updateDistPrices(): void {
 		this.distPriceCount = DIST_PRICE_UPDATE_INTERVAL;
 
-		computeDistPrices(this.probs, this.distSlotPricesSize, this.distSlotPrices, this.fullDistPrices);
+		if (this.distModelsUsed) {
+			computeDistPrices(this.probs, this.distSlotPricesSize, this.distSlotPrices, this.fullDistPrices);
+		} else {
+			// The models still have their initial probabilities.
+			const initial = getInitialPrices();
+			for (let distState = 0; distState < DIST_STATES; ++distState) {
+				this.distSlotPrices[distState].set(initial.distSlotPrices[distState].subarray(0, this.distSlotPricesSize));
+				this.fullDistPrices[distState].set(initial.fullDistPrices[distState]);
+			}
+		}
 	}
 
 	private updateAlignPrices(): void {
 		this.alignPriceCount = ALIGN_PRICE_UPDATE_INTERVAL;
 
-		computeAlignPrices(this.probs, this.alignPrices);
+		if (this.alignModelUsed) {
+			computeAlignPrices(this.probs, this.alignPrices);
+		} else {
+			this.alignPrices.set(getInitialPrices().alignPrices);
+		}
 	}
 
 	/**
@@ -590,6 +616,8 @@ export class LengthEncoder extends LengthCoder {
 
 	private readonly counters: Int32Array;
 	private readonly prices: Int32Array[];
+	/** Whether a length was encoded since the last reset. */
+	private used = false;
 
 	constructor(probs: Probs, coder: number, pb: number, niceLen: number) {
 		super(probs, coder);
@@ -607,6 +635,7 @@ export class LengthEncoder extends LengthCoder {
 		// Reset counters to zero to force price update before
 		// the prices are needed.
 		this.counters.fill(0);
+		this.used = false;
 	}
 
 	encode(rc: RangeEncoder, len: number, posState: number): void {
@@ -629,6 +658,7 @@ export class LengthEncoder extends LengthCoder {
 		}
 
 		--this.counters[posState];
+		this.used = true;
 	}
 
 	getPrice(len: number, posState: number): number {
@@ -645,7 +675,13 @@ export class LengthEncoder extends LengthCoder {
 	}
 
 	private updatePosStatePrices(posState: number): void {
-		computeLengthPrices(this.probs, this.coder, posState, this.prices[posState]);
+		if (this.used) {
+			computeLengthPrices(this.probs, this.coder, posState, this.prices[posState]);
+		} else {
+			// The model still has its initial probabilities.
+			const prices = this.prices[posState];
+			prices.set(getInitialPrices().lengthPrices.subarray(0, prices.length));
+		}
 	}
 }
 
@@ -672,4 +708,40 @@ function computeLengthPrices(probs: Probs, coder: number, posState: number, pric
 		prices[i] = choice0Price + choice1Price
 			+ getBitTreePrice(probs, coder + LEN_HIGH, 8, i - LOW_SYMBOLS - MID_SYMBOLS);
 	}
+}
+
+interface InitialPrices {
+	distSlotPrices: Int32Array[];
+	fullDistPrices: Int32Array[];
+	alignPrices: Int32Array;
+	/** Prices of all lengths, the same for every length coder and position state. */
+	lengthPrices: Int32Array;
+}
+
+let initialPrices: InitialPrices | undefined;
+
+/**
+ * Price tables for models that still have their initial probabilities.
+ * They are the same for every encoder, so they are computed once, by the
+ * same functions the encoders use, on an array of initial probabilities.
+ */
+function getInitialPrices(): InitialPrices {
+	if (initialPrices === undefined) {
+		const probs = new Uint16Array(LITERAL);
+		initProbs(probs);
+
+		const distSlotPrices = newPriceArray(DIST_STATES, DIST_SLOTS);
+		const fullDistPrices = newPriceArray(DIST_STATES, FULL_DISTANCES);
+		computeDistPrices(probs, DIST_SLOTS, distSlotPrices, fullDistPrices);
+
+		const alignPrices = new Int32Array(ALIGN_SIZE);
+		computeAlignPrices(probs, alignPrices);
+
+		const lengthPrices = new Int32Array(MATCH_LEN_MAX - MATCH_LEN_MIN + 1);
+		computeLengthPrices(probs, MATCH_LEN, 0, lengthPrices);
+
+		initialPrices = { distSlotPrices, fullDistPrices, alignPrices, lengthPrices };
+	}
+
+	return initialPrices;
 }
