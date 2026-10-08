@@ -56,16 +56,18 @@ checked too), `decompress()` of every fixture against its input, and every
 malformed case against its recorded outcome, with the expected count of each
 class.
 
-## CI never needs Java
+## CI
 
-CI compares against the **committed** fixtures; it does not invoke XZ for Java.
-The committed generator reproduces the fixtures from the Java source, so fixture
-generation is auditable rather than a trusted component.
+Besides running the checks above, CI regenerates the fixtures from XZ for Java
+at the pinned commit and fails if the result differs from the committed files in
+anything but `javaVersion`, which names the JDK build that ran the generator.
 
 ## Regenerating locally
 
-Needed only to audit the fixtures or to move the Java pin. The fixture tooling
-is TypeScript run directly by Node, so it needs **Node >= 22.18** (built-in type
+Needed to audit the fixtures, to move the Java pin, and after any change that
+alters what the generator produces, such as a corpus extension; CI's
+regeneration job reports such a change as a difference. The fixture tooling is
+TypeScript run directly by Node, so it needs **Node >= 22.18** (built-in type
 stripping; only for this tooling, the package's supported runtimes are
 unchanged). It also needs a JDK (`javac`; a JRE is not enough), `git` and `tar`.
 

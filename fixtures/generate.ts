@@ -1,7 +1,8 @@
 /**
  * Regenerates every committed fixture from the Java code (XZ for Java at
- * the pinned commit). CI never runs this: it compares against the
- * committed files. Run it only to audit the fixtures or to move the pin.
+ * the pinned commit). CI runs it on every change and fails if its output
+ * differs from the committed files. Run it locally to audit the fixtures,
+ * to move the pin, or after changing what it produces.
  *
  * Usage:
  *   node fixtures/generate.ts <xz-java checkout> [--repin]
