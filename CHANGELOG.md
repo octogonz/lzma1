@@ -1,5 +1,101 @@
 # Changelog
 
+## [0.2.0](https://github.com/octogonz/lzma1/compare/v0.4.0...v0.2.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* rewrite LZMA as a port of XZ for Java ([#36](https://github.com/octogonz/lzma1/issues/36))
+* break up god class, extract components, modernize internals ([#32](https://github.com/octogonz/lzma1/issues/32))
+* Improve API design to be more conventional/performant ([#17](https://github.com/octogonz/lzma1/issues/17))
+
+### Features
+
+* add endMarker option to omit the end marker when the size is known ([#37](https://github.com/octogonz/lzma1/issues/37)) ([8dbe324](https://github.com/octogonz/lzma1/commit/8dbe3245c37f63a8a53dc5e7254af5f7362e1cbe))
+* Add LZMA range encoding and decoding implementation ([#29](https://github.com/octogonz/lzma1/issues/29)) ([399705f](https://github.com/octogonz/lzma1/commit/399705f77359472a4b2f6cf5935cb63b34f287f5))
+* add tests ([8d184e1](https://github.com/octogonz/lzma1/commit/8d184e1a125a8d43f82b4fb43e3bda3122451ac4))
+* esm & cjs builds ([64b63ea](https://github.com/octogonz/lzma1/commit/64b63ea82904bc0306afe0de652d02e8629b2072))
+* initial fork ([809c700](https://github.com/octogonz/lzma1/commit/809c7005af8549c8c4ae8228cd58045bb7b1a847))
+* rewrite LZMA as a port of XZ for Java ([#36](https://github.com/octogonz/lzma1/issues/36)) ([41c1793](https://github.com/octogonz/lzma1/commit/41c179342f09da3a3b550c78924391679ab5e27a))
+* update package scripts ([6e22e05](https://github.com/octogonz/lzma1/commit/6e22e059808062cfdeddead43c72af1c170e2c1e))
+
+
+### Bug Fixes
+
+* **ci:** release manifest file ([c08996a](https://github.com/octogonz/lzma1/commit/c08996add442d4d33cc8c40d59f39d9c78ebbdb2))
+* **ci:** update release workflow ([845a3fd](https://github.com/octogonz/lzma1/commit/845a3fd5513b1edd3dae5ac147deffd8549e3741))
+* interpret an 8-bit and 16-bit value as signed & types improvements ([#16](https://github.com/octogonz/lzma1/issues/16)) ([c053e8b](https://github.com/octogonz/lzma1/commit/c053e8b541e9d07bc82542750ee236d04394e3ef))
+* regression-since-v0.0.4 ([#27](https://github.com/octogonz/lzma1/issues/27)) ([b628b2e](https://github.com/octogonz/lzma1/commit/b628b2e70875138b0b3f4212cf82a42f6929308b))
+
+
+### Performance Improvements
+
+* convert hot arrays to typed arrays, remove dead ops ([#33](https://github.com/octogonz/lzma1/issues/33)) ([a2fcde3](https://github.com/octogonz/lzma1/commit/a2fcde3ea7fada4b5654530b92e32c7dd9e73058))
+
+
+### Documentation
+
+* add CLAUDE.md with repo rules and code style ([9d50446](https://github.com/octogonz/lzma1/commit/9d50446e07864dcaf550ffc21034b8298d6d3d3e))
+* add packet diagram via mermaid ([dcb1a33](https://github.com/octogonz/lzma1/commit/dcb1a33003fabe00c7b9f38c23f06b70bac57233))
+* add test badge ([0acc7a2](https://github.com/octogonz/lzma1/commit/0acc7a22ab2f47828c070178dd31383126796754))
+* update github install example ([cc697b9](https://github.com/octogonz/lzma1/commit/cc697b97d8fe6e91ca7f485890316e3ed3e272ec))
+* update README ([f0b09bd](https://github.com/octogonz/lzma1/commit/f0b09bdaf2675831d51e181c3952c9ce68b3e3da))
+* update README ([bb980ec](https://github.com/octogonz/lzma1/commit/bb980ec475ad3bc816fa9b060eb93328942825d2))
+* update README & header diagram ([b92d4a6](https://github.com/octogonz/lzma1/commit/b92d4a61dbe218cb2b850dafb6cba0beb3d4777f))
+* update readme and package license ([6c23fb5](https://github.com/octogonz/lzma1/commit/6c23fb5eb5eb7d8c119e9ae5a0165e0c9ef2ae28))
+
+
+### Build System
+
+* artefacts ([7c210b5](https://github.com/octogonz/lzma1/commit/7c210b5f9e30813d1dec6a9812a247ddd212fd5e))
+* cleanup scripts ([e74a95a](https://github.com/octogonz/lzma1/commit/e74a95a922c8cd9ec29d1ac254320f502e3e4cca))
+* update artefacts step ([767740a](https://github.com/octogonz/lzma1/commit/767740a94fb15fee344667c102b37cf5574dedf5))
+
+
+### Maintenance
+
+* add pre-release workflow ([e6b2cba](https://github.com/octogonz/lzma1/commit/e6b2cba3318134beebd3f68b8312f50bce083ce2))
+* add release workflow ([69b635b](https://github.com/octogonz/lzma1/commit/69b635bb3f3889cd7cb9bdbf53af4db514679a7e))
+* break up god class, extract components, modernize internals ([#32](https://github.com/octogonz/lzma1/issues/32)) ([ee768bf](https://github.com/octogonz/lzma1/commit/ee768bfe8f01f3749fd728afb17e7570416e322e))
+* **ci:** update inactive issues ([b1a1d74](https://github.com/octogonz/lzma1/commit/b1a1d748800a5f7fa9673d0272fb1d899ce7fd75))
+* clean scripts ([267321a](https://github.com/octogonz/lzma1/commit/267321a4148f7f6f57a26a8b45efcaa89861da3d))
+* configs ([8197a87](https://github.com/octogonz/lzma1/commit/8197a877a2083abf724752ce7f1899f5d1ceb81c))
+* **config:** vscode ([7db4a98](https://github.com/octogonz/lzma1/commit/7db4a98b9e7f0ecc33ffd0f9ccb2e3fe7a8d83e8))
+* fix release config ([64dbfc8](https://github.com/octogonz/lzma1/commit/64dbfc8e103594d9cd17b3f7c163e0ce405388bd))
+* **github:** add tests and inactive issues ([dcec720](https://github.com/octogonz/lzma1/commit/dcec7204059c43bf30ba5813c67859dedb8072e1))
+* Improve API design to be more conventional/performant ([#17](https://github.com/octogonz/lzma1/issues/17)) ([2c78ee8](https://github.com/octogonz/lzma1/commit/2c78ee84834d0b8418210246dec6c3d4a60cfc75))
+* improve types & constants ([9f861f8](https://github.com/octogonz/lzma1/commit/9f861f85ba88ba709207c98626271456d185da7c))
+* improve types & formatting ([40e1755](https://github.com/octogonz/lzma1/commit/40e1755ad77fbeb4cf23dc2e4c8db860c632a6ea))
+* improve types & restructure implementation ([#2](https://github.com/octogonz/lzma1/issues/2)) ([0e7b7ff](https://github.com/octogonz/lzma1/commit/0e7b7ff90b29d2e5fc1d490998058f6a920560a1))
+* license change Apache-2.0 to MIT ([7f3719b](https://github.com/octogonz/lzma1/commit/7f3719b768d8a11343b06736ebf27349481b4c11))
+* migrate to `bun.lock`, update dependencies & configs ([#30](https://github.com/octogonz/lzma1/issues/30)) ([a304def](https://github.com/octogonz/lzma1/commit/a304def1fac2f3878d81a10407b72a4e625347ed))
+* namings, typings ([638eefe](https://github.com/octogonz/lzma1/commit/638eefea34d82739ae43c56ccc7686e930662e95))
+* **package:** upgrades ([8634caa](https://github.com/octogonz/lzma1/commit/8634caaeb2d15891c39a9a3b440f45fcc82b6d41))
+* publish to npm via trusted publisher (OIDC) ([dac528b](https://github.com/octogonz/lzma1/commit/dac528b96a3cf50b39ecf2bb1587cc61b829725a))
+* release cleanup ([#20](https://github.com/octogonz/lzma1/issues/20)) ([8e1dab1](https://github.com/octogonz/lzma1/commit/8e1dab14ee84eec7b975f621caf26b6a7b47d9e7))
+* **release:** fix semantic version ([e38d229](https://github.com/octogonz/lzma1/commit/e38d229e6a83a126a9cc1ed25df66e0bf6673bd5))
+* remove [@ts-nocheck](https://github.com/ts-nocheck), fix type errors other improvements ([#22](https://github.com/octogonz/lzma1/issues/22)) ([8c15430](https://github.com/octogonz/lzma1/commit/8c15430878b65a41531c74f1f592f7212aa210a1))
+* remove [@ts-nocheck](https://github.com/ts-nocheck), fix type errors other improvements ([#24](https://github.com/octogonz/lzma1/issues/24)) ([df13347](https://github.com/octogonz/lzma1/commit/df133470620978ee794f3df1fc0afa664d225182))
+* remove package-lock ([7f3a714](https://github.com/octogonz/lzma1/commit/7f3a714bbc5c533423b3b0eb8da12231eacbf09a))
+* run fmt ([2cea103](https://github.com/octogonz/lzma1/commit/2cea103d6f4fd8b27b6c37be5fda208cd092f701))
+* skip coverage report on release PRs ([fb04094](https://github.com/octogonz/lzma1/commit/fb0409440b0a79471f22dfff9d53671c94cd1320))
+* speedup tests using Bun with Node compatible tests & other improvements ([592489a](https://github.com/octogonz/lzma1/commit/592489aab23007d517aed20ce6ce4385abe03901))
+* types, consistency, docs & tests ([#14](https://github.com/octogonz/lzma1/issues/14)) ([2d354c1](https://github.com/octogonz/lzma1/commit/2d354c1f85f29637258b801845678b4f3264fded))
+* update config ([455806d](https://github.com/octogonz/lzma1/commit/455806df3fc19756adc23201b8fe31fe39df14c9))
+* update configs ([e24f4ae](https://github.com/octogonz/lzma1/commit/e24f4ae216d571472dc2321a86cb039319384d09))
+* update copyright year and owner ([296ee0b](https://github.com/octogonz/lzma1/commit/296ee0bbf991feac453d4e108b2a9f8b90ea7179))
+* update deps & configs ([#12](https://github.com/octogonz/lzma1/issues/12)) ([d55f8ef](https://github.com/octogonz/lzma1/commit/d55f8ef47dbe5f4656a7dde6300fb32b151938e2))
+* update node version to 24 ([bd087b3](https://github.com/octogonz/lzma1/commit/bd087b33cf22da1c6167d3a6750dba3fcc30ab86))
+* update release scripts ([497418f](https://github.com/octogonz/lzma1/commit/497418f46493d91d843722bcce62a75da876b0c4))
+* update workflows & configs ([d5ca705](https://github.com/octogonz/lzma1/commit/d5ca705948d51091c130b203df7bb9a8382305ec))
+
+
+### Testing
+
+* add edge case for unknown header size in decompression ([fd08956](https://github.com/octogonz/lzma1/commit/fd089568c490d5251500b46e68ff42d851e3fc0b))
+* add edge cases ([25dfc42](https://github.com/octogonz/lzma1/commit/25dfc422676f50c45b09dde47a796064f1123cf6))
+* update runner, add nvmrc ([65e5174](https://github.com/octogonz/lzma1/commit/65e5174f5c446257bfcc6994a61c4ddcf5522e80))
+
 ## [0.4.0](https://github.com/xseman/lzma1/compare/v0.3.0...v0.4.0) (2026-09-30)
 
 
